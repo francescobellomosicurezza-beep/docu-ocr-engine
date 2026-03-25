@@ -484,6 +484,8 @@ def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[dict]) 
 # ENDPOINTS
 # =========================
 
+from typing import Annotated
+
 @app.get("/")
 def home():
     return {
@@ -493,22 +495,14 @@ def home():
 
 
 @app.post("/analyze")
-async def analyze(files: List[UploadFile] = File(...)):
-    if not files:
-        raise HTTPException(status_code=400, detail="Nessun file caricato")
-
-    results = []
-
-    for file in files:
-        content = await file.read()
-        item = analyze_document(file.filename, content, file.content_type or "")
-        results.append(item)
-
-    return {"results": results}
+async def analyze(file: Annotated[UploadFile, File(...)]):
+    content = await file.read()
+    item = analyze_document(file.filename, content, file.content_type or "")
+    return {"results": [item]}
 
 
 @app.post("/organize-zip")
-async def organize_zip(files: List[UploadFile] = File(...)):
+async def organize_zip(files: Annotated[list[UploadFile], File(...)]):
     if not files:
         raise HTTPException(status_code=400, detail="Nessun file caricato")
 
