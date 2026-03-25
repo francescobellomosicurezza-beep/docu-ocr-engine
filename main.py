@@ -10,7 +10,15 @@ import re
 import json
 from datetime import datetime
 from google.cloud import vision
-from google.oauth2 import service_account
+
+# =========================
+# SCRIVE IL JSON SU FILE
+# =========================
+
+creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+if creds_json:
+    with open("/tmp/gcp-key.json", "w", encoding="utf-8") as f:
+        f.write(creds_json)
 
 app = FastAPI()
 
@@ -28,8 +36,6 @@ FOLDERS = {
     "altri_da_verificare": "altri_da_verificare",
 }
 
-# Regole scadenza MVP
-# years = None -> nessuna scadenza automatica
 COURSE_RULES = {
     "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
     "PRIMO_SOCCORSO": {"years": 3, "label": "data_scadenza"},
@@ -39,7 +45,6 @@ COURSE_RULES = {
     "DEFAULT": {"years": 5, "label": "data_scadenza"},
 }
 
-# Limite soft per alert OCR lato app (non blocco reale dei costi)
 OCR_SOFT_LIMIT = int(os.getenv("OCR_SOFT_LIMIT", "800"))
 
 
@@ -114,17 +119,14 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
 # =========================
 
 def get_vision_client():
-    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
-    if not creds_json:
-        raise RuntimeError("Variabile GOOGLE_APPLICATION_CREDENTIALS_JSON mancante")
+    credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if not credentials_path:
+        raise RuntimeError("Variabile GOOGLE_APPLICATION_CREDENTIALS mancante")
 
-    try:
-        creds_dict = json.loads(creds_json)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"JSON credenziali Google non valido: {e}")
+    if not os.path.exists(credentials_path):
+        raise RuntimeError(f"File credenziali non trovato: {credentials_path}")
 
-    credentials = service_account.Credentials.from_service_account_info(creds_dict)
-    return vision.ImageAnnotatorClient(credentials=credentials)
+    return vision.ImageAnnotatorClient()
 
 
 def ocr_image_bytes(image_bytes: bytes) -> str:
@@ -258,7 +260,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
         "documenti_aziendali": 0,
     }
 
-    # Attestati
     if "attestato" in blob:
         scores["attestati"] += 5
     if "corso" in blob:
@@ -270,7 +271,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "verifica dell’apprendimento" in blob or "verifica dell'apprendimento" in blob:
         scores["attestati"] += 2
 
-    # Nomine
     if "nomina" in blob:
         scores["nomine"] += 5
     if "designazione" in blob:
@@ -280,7 +280,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "preposto" in blob:
         scores["nomine"] += 2
 
-    # Visite mediche
     if "giudizio di idoneità" in blob or "giudizio di idoneita" in blob:
         scores["visite_mediche"] += 5
     if "medico competente" in blob:
@@ -290,7 +289,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "sorveglianza sanitaria" in blob:
         scores["visite_mediche"] += 2
 
-    # DPI
     if "dpi" in blob:
         scores["verbali_dpi"] += 5
     if "dispositivi di protezione individuale" in blob:
@@ -300,7 +298,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "firma per ricevuta" in blob:
         scores["verbali_dpi"] += 2
 
-    # Documenti aziendali
     if "dvr" in blob:
         scores["documenti_aziendali"] += 5
     if "valutazione dei rischi" in blob:
