@@ -1,13 +1,16 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Annotated
 import fitz  # PyMuPDF
 import tempfile
 import zipfile
 import io
 import os
 import re
+import json
 from datetime import datetime
+from google.cloud import vision
+from google.oauth2 import service_account
 
 app = FastAPI()
 
@@ -36,6 +39,9 @@ COURSE_RULES = {
     "DEFAULT": {"years": 5, "label": "data_scadenza"},
 }
 
+# Limite soft per alert OCR lato app (non blocco reale dei costi)
+OCR_SOFT_LIMIT = int(os.getenv("OCR_SOFT_LIMIT", "800"))
+
 
 # =========================
 # HELPERS GENERALI
@@ -44,9 +50,30 @@ COURSE_RULES = {
 def normalize_spaces(text: str) -> str:
     text = text.replace("\xa0", " ")
     text = text.replace("\r", "\n")
+    text = text.replace("\x00", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def normalize_text_for_matching(text: str) -> str:
+    text = text or ""
+    text = normalize_spaces(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def is_text_sufficient(text: str) -> bool:
+    clean = normalize_text_for_matching(text)
+
+    if not clean:
+        return False
+    if len(clean) < 80:
+        return False
+    if len(clean.split()) < 15:
+        return False
+
+    return True
 
 
 def safe_filename(name: str) -> str:
@@ -61,7 +88,6 @@ def parse_date(date_str: str) -> Optional[datetime]:
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"):
         try:
             dt = datetime.strptime(date_str, fmt)
-            # correzione anni a 2 cifre
             if dt.year < 1970:
                 dt = dt.replace(year=dt.year + 100)
             return dt
@@ -80,9 +106,73 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
     try:
         return dt.replace(year=dt.year + years)
     except ValueError:
-        # gestisce 29 febbraio
         return dt.replace(month=2, day=28, year=dt.year + years)
 
+
+# =========================
+# OCR GOOGLE VISION
+# =========================
+
+def get_vision_client():
+    creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+    if not creds_json:
+        raise RuntimeError("Variabile GOOGLE_APPLICATION_CREDENTIALS_JSON mancante")
+
+    try:
+        creds_dict = json.loads(creds_json)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"JSON credenziali Google non valido: {e}")
+
+    credentials = service_account.Credentials.from_service_account_info(creds_dict)
+    return vision.ImageAnnotatorClient(credentials=credentials)
+
+
+def ocr_image_bytes(image_bytes: bytes) -> str:
+    client = get_vision_client()
+    image = vision.Image(content=image_bytes)
+    response = client.text_detection(image=image)
+
+    if response.error.message:
+        raise RuntimeError(f"Errore Google Vision OCR: {response.error.message}")
+
+    texts = response.text_annotations
+    if texts:
+        return normalize_spaces(texts[0].description)
+
+    return ""
+
+
+def pdf_to_page_images(content: bytes, dpi: int = 200) -> List[bytes]:
+    images = []
+    zoom = dpi / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
+
+    doc = fitz.open(stream=content, filetype="pdf")
+    try:
+        for page in doc:
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            images.append(pix.tobytes("png"))
+    finally:
+        doc.close()
+
+    return images
+
+
+def ocr_pdf_pages(content: bytes) -> Tuple[str, int]:
+    page_images = pdf_to_page_images(content)
+    texts = []
+
+    for img_bytes in page_images:
+        page_text = ocr_image_bytes(img_bytes)
+        if page_text:
+            texts.append(page_text)
+
+    return normalize_spaces("\n\n".join(texts)), len(page_images)
+
+
+# =========================
+# ESTRAZIONE TESTO FILE
+# =========================
 
 def extract_pdf_text(content: bytes) -> str:
     text = ""
@@ -106,15 +196,51 @@ def extract_pdf_text(content: bytes) -> str:
     return normalize_spaces(text)
 
 
-def extract_text_from_file(filename: str, content: bytes, content_type: str) -> str:
+def extract_text_from_file(filename: str, content: bytes, content_type: str) -> dict:
     ext = os.path.splitext(filename.lower())[1]
 
-    if content_type == "application/pdf" or ext == ".pdf":
-        return extract_pdf_text(content)
+    result = {
+        "text": "",
+        "extraction_method": "",
+        "ocr_used": False,
+        "ocr_pages": 0,
+        "ocr_soft_limit": OCR_SOFT_LIMIT,
+        "ocr_alert": False,
+    }
 
-    # Per ora niente OCR reale su immagini/scansioni.
-    # Questa è la base MVP testuale.
-    return ""
+    is_pdf = content_type == "application/pdf" or ext == ".pdf"
+    is_image = (
+        content_type.startswith("image/")
+        or ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]
+    )
+
+    if is_pdf:
+        pdf_text = extract_pdf_text(content)
+        result["text"] = pdf_text
+        result["extraction_method"] = "pymupdf"
+
+        if not is_text_sufficient(pdf_text):
+            ocr_text, page_count = ocr_pdf_pages(content)
+            result["text"] = ocr_text
+            result["extraction_method"] = "google_vision_ocr_pdf_pages"
+            result["ocr_used"] = True
+            result["ocr_pages"] = page_count
+            result["ocr_alert"] = page_count >= OCR_SOFT_LIMIT
+
+        return result
+
+    if is_image:
+        ocr_text = ocr_image_bytes(content)
+        result["text"] = ocr_text
+        result["extraction_method"] = "google_vision_ocr_image"
+        result["ocr_used"] = True
+        result["ocr_pages"] = 1
+        result["ocr_alert"] = 1 >= OCR_SOFT_LIMIT
+        return result
+
+    result["text"] = ""
+    result["extraction_method"] = "unsupported_file_type"
+    return result
 
 
 # =========================
@@ -238,7 +364,6 @@ def detect_course_family(text: str, filename: str) -> Tuple[str, str]:
 
 
 def extract_name_from_attestato(text: str) -> Tuple[str, str]:
-    # 1. dopo "conferito a"
     m = re.search(r"conferito a\s+([A-ZÀ-Ù' ]{4,})", text, re.IGNORECASE)
     if m:
         raw = normalize_spaces(m.group(1))
@@ -249,7 +374,6 @@ def extract_name_from_attestato(text: str) -> Tuple[str, str]:
             cognome = " ".join(parts[1:]).title()
             return nome, cognome
 
-    # 2. riga prima di "nato a"
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     for i, line in enumerate(lines):
         if re.search(r"\bnato a\b|\bnata a\b", line, re.IGNORECASE) and i > 0:
@@ -282,7 +406,6 @@ def extract_dates(text: str) -> List[datetime]:
 
 
 def extract_conclusion_date(text: str) -> Optional[datetime]:
-    # 1. periodo di svolgimento del corso -> ultima data del blocco
     m = re.search(
         r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso)\s*:?\s*(.+?)(data emissione|programma del corso|il responsabile|$)",
         text,
@@ -294,7 +417,6 @@ def extract_conclusion_date(text: str) -> Optional[datetime]:
         if dates:
             return max(dates)
 
-    # 2. dal ... al ...
     m = re.search(
         r"dal\s+(\d{2}[/-]\d{2}[/-]\d{2,4}).{0,20}?al\s+(\d{2}[/-]\d{2}[/-]\d{2,4})",
         text,
@@ -305,7 +427,6 @@ def extract_conclusion_date(text: str) -> Optional[datetime]:
         if dt:
             return dt
 
-    # 3. ultima data plausibile escludendo nascita e data emissione
     all_dates = extract_dates(text)
     if not all_dates:
         return None
@@ -390,7 +511,8 @@ def parse_attestato(text: str, filename: str) -> dict:
 # =========================
 
 def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
-    text = extract_text_from_file(filename, content, content_type)
+    extraction = extract_text_from_file(filename, content, content_type)
+    text = extraction["text"]
     category, scores = score_category(text, filename)
 
     result = {
@@ -411,6 +533,11 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
         "confidenza": "bassa",
         "score_details": scores,
         "suggested_filename": safe_filename(filename),
+        "extraction_method": extraction["extraction_method"],
+        "ocr_used": extraction["ocr_used"],
+        "ocr_pages": extraction["ocr_pages"],
+        "ocr_soft_limit": extraction["ocr_soft_limit"],
+        "ocr_alert": extraction["ocr_alert"],
     }
 
     if category == "attestati":
@@ -444,6 +571,7 @@ def build_report_attestati(items: List[dict]) -> str:
                 label,
                 label_value,
                 item.get("confidenza", ""),
+                item.get("extraction_method", ""),
             ])
         )
 
@@ -483,8 +611,6 @@ def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[dict]) 
 # =========================
 # ENDPOINTS
 # =========================
-
-from typing import Annotated
 
 @app.get("/")
 def home():
