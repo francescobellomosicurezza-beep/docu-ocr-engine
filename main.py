@@ -38,6 +38,7 @@ FOLDERS = {
 
 COURSE_RULES = {
     "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
+    "FORMAZIONE_SPECIFICA": {"years": 5, "label": "data_scadenza"},
     "PRIMO_SOCCORSO": {"years": 3, "label": "data_scadenza"},
     "PREPOSTO": {"years": 2, "label": "data_scadenza"},
     "PONTEGGI": {"years": 4, "label": "data_scadenza"},
@@ -324,6 +325,9 @@ def detect_course_family(text: str, filename: str) -> Tuple[str, str]:
     blob = f"{filename}\n{text}".lower()
 
     is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
+
+    if "formazione specifica" in blob or "parte specifica" in blob:
+        return "FORMAZIONE_SPECIFICA", "aggiornamento" if is_update else "base"
 
     if "formazione generale" in blob:
         return "FORMAZIONE_GENERALE", "aggiornamento" if is_update else "base"
