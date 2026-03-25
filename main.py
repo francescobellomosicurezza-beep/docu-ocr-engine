@@ -1,8 +1,488 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from typing import List, Optional, Tuple
 import fitz  # PyMuPDF
 import tempfile
+import zipfile
+import io
+import os
+import re
+from datetime import datetime
 
 app = FastAPI()
+
+
+# =========================
+# CONFIG
+# =========================
+
+FOLDERS = {
+    "attestati": "attestati",
+    "nomine": "nomine",
+    "visite_mediche": "visite_mediche",
+    "verbali_dpi": "verbali_dpi",
+    "documenti_aziendali": "documenti_aziendali",
+    "altri_da_verificare": "altri_da_verificare",
+}
+
+# Regole scadenza MVP
+# years = None -> nessuna scadenza automatica
+COURSE_RULES = {
+    "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
+    "PRIMO_SOCCORSO": {"years": 3, "label": "data_scadenza"},
+    "PREPOSTO": {"years": 2, "label": "data_scadenza"},
+    "PONTEGGI": {"years": 4, "label": "data_scadenza"},
+    "RLS": {"years": 1, "label": "prossimo_aggiornamento"},
+    "DEFAULT": {"years": 5, "label": "data_scadenza"},
+}
+
+
+# =========================
+# HELPERS GENERALI
+# =========================
+
+def normalize_spaces(text: str) -> str:
+    text = text.replace("\xa0", " ")
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def safe_filename(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"[^\w\s\-.]", "", name, flags=re.UNICODE)
+    name = re.sub(r"\s+", "_", name)
+    return name
+
+
+def parse_date(date_str: str) -> Optional[datetime]:
+    date_str = date_str.strip()
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            # correzione anni a 2 cifre
+            if dt.year < 1970:
+                dt = dt.replace(year=dt.year + 100)
+            return dt
+        except ValueError:
+            continue
+    return None
+
+
+def format_date(dt: Optional[datetime]) -> str:
+    if not dt:
+        return ""
+    return dt.strftime("%d/%m/%Y")
+
+
+def add_years_safe(dt: datetime, years: int) -> datetime:
+    try:
+        return dt.replace(year=dt.year + years)
+    except ValueError:
+        # gestisce 29 febbraio
+        return dt.replace(month=2, day=28, year=dt.year + years)
+
+
+def extract_pdf_text(content: bytes) -> str:
+    text = ""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        doc = fitz.open(tmp_path)
+        for page in doc:
+            text += page.get_text() + "\n"
+        doc.close()
+    except Exception:
+        text = ""
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    return normalize_spaces(text)
+
+
+def extract_text_from_file(filename: str, content: bytes, content_type: str) -> str:
+    ext = os.path.splitext(filename.lower())[1]
+
+    if content_type == "application/pdf" or ext == ".pdf":
+        return extract_pdf_text(content)
+
+    # Per ora niente OCR reale su immagini/scansioni.
+    # Questa è la base MVP testuale.
+    return ""
+
+
+# =========================
+# CLASSIFICAZIONE DOCUMENTI
+# =========================
+
+def score_category(text: str, filename: str) -> Tuple[str, dict]:
+    blob = f"{filename}\n{text}".lower()
+
+    scores = {
+        "attestati": 0,
+        "nomine": 0,
+        "visite_mediche": 0,
+        "verbali_dpi": 0,
+        "documenti_aziendali": 0,
+    }
+
+    # Attestati
+    if "attestato" in blob:
+        scores["attestati"] += 5
+    if "corso" in blob:
+        scores["attestati"] += 2
+    if "formazione" in blob:
+        scores["attestati"] += 2
+    if "partecipazione" in blob:
+        scores["attestati"] += 2
+    if "verifica dell’apprendimento" in blob or "verifica dell'apprendimento" in blob:
+        scores["attestati"] += 2
+
+    # Nomine
+    if "nomina" in blob:
+        scores["nomine"] += 5
+    if "designazione" in blob:
+        scores["nomine"] += 3
+    if "incarico" in blob:
+        scores["nomine"] += 2
+    if "preposto" in blob:
+        scores["nomine"] += 2
+
+    # Visite mediche
+    if "giudizio di idoneità" in blob or "giudizio di idoneita" in blob:
+        scores["visite_mediche"] += 5
+    if "medico competente" in blob:
+        scores["visite_mediche"] += 3
+    if "idoneo" in blob or "idonea" in blob:
+        scores["visite_mediche"] += 2
+    if "sorveglianza sanitaria" in blob:
+        scores["visite_mediche"] += 2
+
+    # DPI
+    if "dpi" in blob:
+        scores["verbali_dpi"] += 5
+    if "dispositivi di protezione individuale" in blob:
+        scores["verbali_dpi"] += 4
+    if "consegna" in blob:
+        scores["verbali_dpi"] += 2
+    if "firma per ricevuta" in blob:
+        scores["verbali_dpi"] += 2
+
+    # Documenti aziendali
+    if "dvr" in blob:
+        scores["documenti_aziendali"] += 5
+    if "valutazione dei rischi" in blob:
+        scores["documenti_aziendali"] += 4
+    if "organigramma" in blob:
+        scores["documenti_aziendali"] += 3
+    if "protocollo" in blob:
+        scores["documenti_aziendali"] += 2
+
+    best_category = max(scores, key=scores.get)
+    best_score = scores[best_category]
+
+    if best_score <= 2:
+        return "altri_da_verificare", scores
+
+    return best_category, scores
+
+
+# =========================
+# ESTRAZIONE DATI ATTESTATI
+# =========================
+
+def detect_course_family(text: str, filename: str) -> Tuple[str, str]:
+    blob = f"{filename}\n{text}".lower()
+
+    is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
+
+    if "formazione generale" in blob:
+        return "FORMAZIONE_GENERALE", "aggiornamento" if is_update else "base"
+
+    if "primo soccorso" in blob:
+        return "PRIMO_SOCCORSO", "aggiornamento" if is_update else "base"
+
+    if "preposto" in blob:
+        return "PREPOSTO", "aggiornamento" if is_update else "base"
+
+    if "ponteggi" in blob or "montaggio smontaggio trasformazione ponteggi" in blob:
+        return "PONTEGGI", "aggiornamento" if is_update else "base"
+
+    if "rappresentante dei lavoratori per la sicurezza" in blob or re.search(r"\brls\b", blob):
+        return "RLS", "aggiornamento" if is_update else "base"
+
+    if "datore di lavoro" in blob and (
+        "prevenzione e protezione" in blob or re.search(r"\brspp\b", blob)
+    ):
+        return "RSPP_DL", "aggiornamento" if is_update else "base"
+
+    if "antincendio" in blob:
+        return "ANTINCENDIO", "aggiornamento" if is_update else "base"
+
+    if "carrello" in blob or "carrellista" in blob:
+        return "CARRELLISTA", "aggiornamento" if is_update else "base"
+
+    if re.search(r"\bple\b", blob):
+        return "PLE", "aggiornamento" if is_update else "base"
+
+    if "lavori in quota" in blob:
+        return "LAVORI_IN_QUOTA", "aggiornamento" if is_update else "base"
+
+    return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base"
+
+
+def extract_name_from_attestato(text: str) -> Tuple[str, str]:
+    # 1. dopo "conferito a"
+    m = re.search(r"conferito a\s+([A-ZÀ-Ù' ]{4,})", text, re.IGNORECASE)
+    if m:
+        raw = normalize_spaces(m.group(1))
+        raw = re.split(r"\n|nato a|nata a|nato il|nata il", raw, flags=re.IGNORECASE)[0].strip()
+        parts = [p for p in raw.split(" ") if p]
+        if len(parts) >= 2:
+            nome = parts[0].title()
+            cognome = " ".join(parts[1:]).title()
+            return nome, cognome
+
+    # 2. riga prima di "nato a"
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for i, line in enumerate(lines):
+        if re.search(r"\bnato a\b|\bnata a\b", line, re.IGNORECASE) and i > 0:
+            prev = lines[i - 1].strip()
+            if re.fullmatch(r"[A-ZÀ-Ù' ]{4,}", prev):
+                parts = [p for p in prev.split() if p]
+                if len(parts) >= 2:
+                    nome = parts[0].title()
+                    cognome = " ".join(parts[1:]).title()
+                    return nome, cognome
+
+    return "", ""
+
+
+def extract_birth_date(text: str) -> Optional[datetime]:
+    m = re.search(r"(nato a|nata a).*?(\d{2}[/-]\d{2}[/-]\d{2,4})", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        return parse_date(m.group(2))
+    return None
+
+
+def extract_dates(text: str) -> List[datetime]:
+    raw_dates = re.findall(r"\b\d{2}[/-]\d{2}[/-]\d{2,4}\b", text)
+    parsed = []
+    for d in raw_dates:
+        dt = parse_date(d)
+        if dt:
+            parsed.append(dt)
+    return parsed
+
+
+def extract_conclusion_date(text: str) -> Optional[datetime]:
+    # 1. periodo di svolgimento del corso -> ultima data del blocco
+    m = re.search(
+        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso)\s*:?\s*(.+?)(data emissione|programma del corso|il responsabile|$)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        block = m.group(2)
+        dates = extract_dates(block)
+        if dates:
+            return max(dates)
+
+    # 2. dal ... al ...
+    m = re.search(
+        r"dal\s+(\d{2}[/-]\d{2}[/-]\d{2,4}).{0,20}?al\s+(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m:
+        dt = parse_date(m.group(2))
+        if dt:
+            return dt
+
+    # 3. ultima data plausibile escludendo nascita e data emissione
+    all_dates = extract_dates(text)
+    if not all_dates:
+        return None
+
+    birth_date = extract_birth_date(text)
+
+    emission_match = re.search(r"data emissione\s*:?[\s]*(\d{2}[/-]\d{2}[/-]\d{2,4})", text, re.IGNORECASE)
+    emission_date = parse_date(emission_match.group(1)) if emission_match else None
+
+    valid = []
+    for d in all_dates:
+        if birth_date and d.date() == birth_date.date():
+            continue
+        if emission_date and d.date() == emission_date.date():
+            continue
+        valid.append(d)
+
+    if valid:
+        return max(valid)
+
+    return None
+
+
+def compute_scadenza(course_family: str, conclusion_date: Optional[datetime]) -> Tuple[str, str]:
+    if not conclusion_date:
+        return "", ""
+
+    rule = COURSE_RULES.get(course_family, COURSE_RULES["DEFAULT"])
+    years = rule["years"]
+    label = rule["label"]
+
+    if years is None:
+        return label, ""
+
+    scad = add_years_safe(conclusion_date, years)
+    return label, format_date(scad)
+
+
+def build_attestato_filename(cognome: str, nome: str, course_family: str, original_filename: str) -> str:
+    base_name = f"{cognome}_{nome}_ATTESTATO_{course_family}".strip("_")
+    if base_name == "ATTESTATO_":
+        base_name = os.path.splitext(original_filename)[0]
+    return safe_filename(base_name) + ".pdf"
+
+
+def parse_attestato(text: str, filename: str) -> dict:
+    nome, cognome = extract_name_from_attestato(text)
+    course_family, tipo_percorso = detect_course_family(text, filename)
+    conclusion_date = extract_conclusion_date(text)
+    scad_label, scad_value = compute_scadenza(course_family, conclusion_date)
+
+    confidenza = "bassa"
+    if nome and cognome and course_family != "CORSO_NON_RICONOSCIUTO" and conclusion_date:
+        confidenza = "alta"
+    elif (nome or cognome) and conclusion_date:
+        confidenza = "media"
+
+    suggested_name = build_attestato_filename(
+        cognome.upper() if cognome else "",
+        nome.upper() if nome else "",
+        course_family,
+        filename,
+    )
+
+    return {
+        "categoria": "Attestato",
+        "nome": nome,
+        "cognome": cognome,
+        "corso": course_family,
+        "tipo_percorso": tipo_percorso,
+        "data_conclusione": format_date(conclusion_date),
+        "data_scadenza": scad_value if scad_label == "data_scadenza" else "",
+        "prossimo_aggiornamento": scad_value if scad_label == "prossimo_aggiornamento" else "",
+        "scadenza_label": scad_label,
+        "confidenza": confidenza,
+        "suggested_filename": suggested_name,
+    }
+
+
+# =========================
+# ANALISI DOCUMENTO
+# =========================
+
+def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
+    text = extract_text_from_file(filename, content, content_type)
+    category, scores = score_category(text, filename)
+
+    result = {
+        "filename": filename,
+        "content_type": content_type,
+        "size_bytes": len(content),
+        "testo_estratto": text[:2000],
+        "categoria": category,
+        "cartella": FOLDERS.get(category, "altri_da_verificare"),
+        "nome": "",
+        "cognome": "",
+        "corso": "",
+        "tipo_percorso": "",
+        "data_conclusione": "",
+        "data_scadenza": "",
+        "prossimo_aggiornamento": "",
+        "scadenza_label": "",
+        "confidenza": "bassa",
+        "score_details": scores,
+        "suggested_filename": safe_filename(filename),
+    }
+
+    if category == "attestati":
+        attestato_data = parse_attestato(text, filename)
+        result.update(attestato_data)
+
+    return result
+
+
+# =========================
+# ZIP + REPORT
+# =========================
+
+def build_report_attestati(items: List[dict]) -> str:
+    lines = []
+    lines.append("REPORT ATTESTATI")
+    lines.append("=" * 80)
+    lines.append("")
+
+    for item in items:
+        label = item.get("scadenza_label", "data_scadenza")
+        label_value = item.get("data_scadenza", "") or item.get("prossimo_aggiornamento", "")
+        lines.append(
+            " | ".join([
+                item.get("suggested_filename", ""),
+                item.get("cognome", ""),
+                item.get("nome", ""),
+                item.get("corso", ""),
+                item.get("tipo_percorso", ""),
+                item.get("data_conclusione", ""),
+                label,
+                label_value,
+                item.get("confidenza", ""),
+            ])
+        )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[dict]) -> io.BytesIO:
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        attestati_report_items = []
+
+        for (upload_file, content), item in zip(files_data, analyzed):
+            folder = item["cartella"]
+            ext = os.path.splitext(upload_file.filename)[1] or ".bin"
+
+            suggested = item.get("suggested_filename", safe_filename(upload_file.filename))
+            if not suggested.lower().endswith(ext.lower()):
+                if folder != "attestati":
+                    suggested = os.path.splitext(suggested)[0] + ext
+
+            zip_path = f"{folder}/{suggested}"
+            zf.writestr(zip_path, content)
+
+            if folder == "attestati":
+                attestati_report_items.append(item)
+
+        if attestati_report_items:
+            report_text = build_report_attestati(attestati_report_items)
+            zf.writestr("attestati/report_attestati.txt", report_text)
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+# =========================
+# ENDPOINTS
+# =========================
 
 @app.get("/")
 def home():
@@ -11,40 +491,44 @@ def home():
         "message": "Docu OCR Engine online"
     }
 
+
 @app.post("/analyze")
-async def analyze(file: UploadFile = File(...)):
-    content = await file.read()
+async def analyze(files: List[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(status_code=400, detail="Nessun file caricato")
 
-    text = ""
+    results = []
 
-    # salva temporaneamente il file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
+    for file in files:
+        content = await file.read()
+        item = analyze_document(file.filename, content, file.content_type or "")
+        results.append(item)
 
-    # apri PDF e leggi testo
-    try:
-        doc = fitz.open(tmp_path)
-        for page in doc:
-            text += page.get_text()
-    except:
-        text = "Errore lettura PDF"
+    return {"results": results}
 
-    return {
-        "results": [
-            {
-                "filename": file.filename,
-                "content_type": file.content_type,
-                "size_bytes": len(content),
-                "testo_estratto": text[:1000],  # primi 1000 caratteri
-                "categoria": "Da determinare",
-                "nome": "",
-                "cognome": "",
-                "corso": "",
-                "tipo_percorso": "",
-                "data_conclusione": "",
-                "data_scadenza": "",
-                "confidenza": "bassa"
-            }
-        ]
-    }
+
+@app.post("/organize-zip")
+async def organize_zip(files: List[UploadFile] = File(...)):
+    if not files:
+        raise HTTPException(status_code=400, detail="Nessun file caricato")
+
+    files_data: List[Tuple[UploadFile, bytes]] = []
+    analyzed: List[dict] = []
+
+    for file in files:
+        content = await file.read()
+        files_data.append((file, content))
+        analyzed.append(analyze_document(file.filename, content, file.content_type or ""))
+
+    zip_buffer = build_zip(files_data, analyzed)
+
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="archivio_documenti.zip"'},
+    )
+
+
+@app.get("/health")
+def health():
+    return JSONResponse({"status": "healthy"})
