@@ -17,14 +17,16 @@ async def analyze(file: UploadFile = File(...)):
         "results": [
             {
                 "filename": file.filename,
-                "categoria": "Attestato",
-                "nome": "Mario",
-                "cognome": "Rossi",
-                "corso": "Primo Soccorso",
-                "tipo_percorso": "base",
-                "data_conclusione": "01/01/2022",
-                "data_scadenza": "01/01/2025",
-                "confidenza": "media"
+                "content_type": file.content_type,
+                "size_bytes": len(content),
+                "categoria": "Da determinare",
+                "nome": "",
+                "cognome": "",
+                "corso": "",
+                "tipo_percorso": "",
+                "data_conclusione": "",
+                "data_scadenza": "",
+                "confidenza": "bassa"
             }
         ]
     }
