@@ -2,3 +2,5 @@ fastapi
 uvicorn
 python-multipart
 PyMuPDF
+google-cloud-vision
+google-auth
