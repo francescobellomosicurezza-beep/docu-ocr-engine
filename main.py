@@ -7,7 +7,6 @@ import zipfile
 import io
 import os
 import re
-import json
 from datetime import datetime
 from google.cloud import vision
 
@@ -36,13 +35,21 @@ FOLDERS = {
     "altri_da_verificare": "altri_da_verificare",
 }
 
+# years = None -> nessuna scadenza automatica
 COURSE_RULES = {
     "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
     "FORMAZIONE_SPECIFICA": {"years": 5, "label": "data_scadenza"},
+    "AGGIORNAMENTO_FORMAZIONE_LAVORATORI": {"years": 5, "label": "data_scadenza"},
     "PRIMO_SOCCORSO": {"years": 3, "label": "data_scadenza"},
     "PREPOSTO": {"years": 2, "label": "data_scadenza"},
     "PONTEGGI": {"years": 4, "label": "data_scadenza"},
     "RLS": {"years": 1, "label": "prossimo_aggiornamento"},
+    "RSPP_DL": {"years": 5, "label": "data_scadenza"},
+    "ANTINCENDIO": {"years": 5, "label": "data_scadenza"},
+    "CARRELLISTA": {"years": 5, "label": "data_scadenza"},
+    "PLE": {"years": 5, "label": "data_scadenza"},
+    "LAVORI_IN_QUOTA": {"years": 5, "label": "data_scadenza"},
+    "HACCP": {"years": 5, "label": "data_scadenza"},
     "DEFAULT": {"years": 5, "label": "data_scadenza"},
 }
 
@@ -67,6 +74,18 @@ def normalize_text_for_matching(text: str) -> str:
     text = normalize_spaces(text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def upper_no_accents(text: str) -> str:
+    repl = {
+        "à": "a", "á": "a", "è": "e", "é": "e", "ì": "i", "í": "i",
+        "ò": "o", "ó": "o", "ù": "u", "ú": "u",
+        "À": "A", "Á": "A", "È": "E", "É": "E", "Ì": "I", "Í": "I",
+        "Ò": "O", "Ó": "O", "Ù": "U", "Ú": "U"
+    }
+    for k, v in repl.items():
+        text = text.replace(k, v)
+    return text.upper()
 
 
 def is_text_sufficient(text: str) -> bool:
@@ -113,6 +132,13 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
         return dt.replace(year=dt.year + years)
     except ValueError:
         return dt.replace(month=2, day=28, year=dt.year + years)
+
+
+def first_non_empty(*values: str) -> str:
+    for v in values:
+        if v and str(v).strip():
+            return str(v).strip()
+    return ""
 
 
 # =========================
@@ -261,6 +287,7 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
         "documenti_aziendali": 0,
     }
 
+    # Attestati
     if "attestato" in blob:
         scores["attestati"] += 5
     if "corso" in blob:
@@ -271,7 +298,10 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
         scores["attestati"] += 2
     if "verifica dell’apprendimento" in blob or "verifica dell'apprendimento" in blob:
         scores["attestati"] += 2
+    if "haccp" in blob:
+        scores["attestati"] += 3
 
+    # Nomine
     if "nomina" in blob:
         scores["nomine"] += 5
     if "designazione" in blob:
@@ -281,6 +311,7 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "preposto" in blob:
         scores["nomine"] += 2
 
+    # Visite mediche
     if "giudizio di idoneità" in blob or "giudizio di idoneita" in blob:
         scores["visite_mediche"] += 5
     if "medico competente" in blob:
@@ -290,7 +321,8 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "sorveglianza sanitaria" in blob:
         scores["visite_mediche"] += 2
 
-    if "dpi" in blob:
+    # DPI
+    if re.search(r"\bdpi\b", blob):
         scores["verbali_dpi"] += 5
     if "dispositivi di protezione individuale" in blob:
         scores["verbali_dpi"] += 4
@@ -299,7 +331,8 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "firma per ricevuta" in blob:
         scores["verbali_dpi"] += 2
 
-    if "dvr" in blob:
+    # Documenti aziendali
+    if re.search(r"\bdvr\b", blob):
         scores["documenti_aziendali"] += 5
     if "valutazione dei rischi" in blob:
         scores["documenti_aziendali"] += 4
@@ -321,70 +354,103 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
 # ESTRAZIONE DATI ATTESTATI
 # =========================
 
+def extract_title_block(text: str) -> str:
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    title_lines = []
+    for line in lines[:20]:
+        if len(line) > 3:
+            title_lines.append(line)
+        if len(title_lines) >= 6:
+            break
+    return " ".join(title_lines).lower()
+
+
 def detect_course_family(text: str, filename: str) -> Tuple[str, str]:
     blob = f"{filename}\n{text}".lower()
+    title_blob = extract_title_block(text)
 
-    is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
+    # Prima individuiamo i casi più specifici
+    if "haccp" in blob or "igiene degli alimenti" in blob or "alimentarista" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
+        return "HACCP", "aggiornamento" if is_update else "base"
 
-    if "formazione specifica" in blob or "parte specifica" in blob:
+    if (
+        "aggiornamento della formazione per lavoratori" in blob
+        or "aggiornamento formazione lavoratori" in blob
+        or "corso di aggiornamento della formazione per lavoratori" in blob
+        or "corso di aggiornamento della formazione lavoratori" in blob
+    ):
+        return "AGGIORNAMENTO_FORMAZIONE_LAVORATORI", "aggiornamento"
+
+    if "formazione specifica" in blob or "parte specifica" in blob or "rischio alto" in title_blob or "rischio medio" in title_blob or "rischio basso" in title_blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "FORMAZIONE_SPECIFICA", "aggiornamento" if is_update else "base"
 
     if "formazione generale" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "FORMAZIONE_GENERALE", "aggiornamento" if is_update else "base"
 
     if "primo soccorso" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "PRIMO_SOCCORSO", "aggiornamento" if is_update else "base"
 
     if "preposto" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "PREPOSTO", "aggiornamento" if is_update else "base"
 
     if "ponteggi" in blob or "montaggio smontaggio trasformazione ponteggi" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "PONTEGGI", "aggiornamento" if is_update else "base"
 
     if "rappresentante dei lavoratori per la sicurezza" in blob or re.search(r"\brls\b", blob):
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "RLS", "aggiornamento" if is_update else "base"
 
-    if "datore di lavoro" in blob and (
-        "prevenzione e protezione" in blob or re.search(r"\brspp\b", blob)
-    ):
+    if "datore di lavoro" in blob and ("prevenzione e protezione" in blob or re.search(r"\brspp\b", blob)):
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "RSPP_DL", "aggiornamento" if is_update else "base"
 
     if "antincendio" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "ANTINCENDIO", "aggiornamento" if is_update else "base"
 
     if "carrello" in blob or "carrellista" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "CARRELLISTA", "aggiornamento" if is_update else "base"
 
     if re.search(r"\bple\b", blob):
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "PLE", "aggiornamento" if is_update else "base"
 
     if "lavori in quota" in blob:
+        is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
         return "LAVORI_IN_QUOTA", "aggiornamento" if is_update else "base"
 
+    is_update = any(k in blob for k in ["aggiornamento", "refresh", "rinnovo", "retraining"])
     return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base"
 
 
 def extract_name_from_attestato(text: str) -> Tuple[str, str]:
-    m = re.search(r"conferito a\s+([A-ZÀ-Ù' ]{4,})", text, re.IGNORECASE)
+    clean_text = normalize_spaces(text)
+    lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
+
+    # 1. dopo "conferito a"
+    m = re.search(r"conferito a\s+([A-ZÀ-Ù' ]{4,})", clean_text, re.IGNORECASE)
     if m:
         raw = normalize_spaces(m.group(1))
-        raw = re.split(r"\n|nato a|nata a|nato il|nata il", raw, flags=re.IGNORECASE)[0].strip()
+        raw = re.split(r"\n|nato a|nata a|nato il|nata il|qualifica", raw, flags=re.IGNORECASE)[0].strip()
         parts = [p for p in raw.split(" ") if p]
         if len(parts) >= 2:
-            nome = parts[0].title()
-            cognome = " ".join(parts[1:]).title()
-            return nome, cognome
+            return parts[0].title(), " ".join(parts[1:]).title()
 
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    # 2. riga prima di nato/nata a
     for i, line in enumerate(lines):
         if re.search(r"\bnato a\b|\bnata a\b", line, re.IGNORECASE) and i > 0:
             prev = lines[i - 1].strip()
-            if re.fullmatch(r"[A-ZÀ-Ù' ]{4,}", prev):
+            if re.fullmatch(r"[A-ZÀ-Ù' ]{4,}", prev) or re.fullmatch(r"[A-ZÀ-Ùa-zà-ù' ]{4,}", prev):
                 parts = [p for p in prev.split() if p]
                 if len(parts) >= 2:
-                    nome = parts[0].title()
-                    cognome = " ".join(parts[1:]).title()
-                    return nome, cognome
+                    return parts[0].title(), " ".join(parts[1:]).title()
 
     return "", ""
 
@@ -407,8 +473,22 @@ def extract_dates(text: str) -> List[datetime]:
 
 
 def extract_conclusion_date(text: str) -> Optional[datetime]:
+    # 1. priorità assoluta: data di conclusione del corso
+    patterns = [
+        r"data di conclusione del corso\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"conclusione del corso\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"data conclusione corso\s*:?\s*(\d{2}[/-]\d{2}[/-]\d{2,4})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text, re.IGNORECASE)
+        if m:
+            dt = parse_date(m.group(1))
+            if dt:
+                return dt
+
+    # 2. periodo di svolgimento corso -> prende ultima data
     m = re.search(
-        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso)\s*:?\s*(.+?)(data emissione|programma del corso|il responsabile|$)",
+        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso)\s*:?\s*(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -418,8 +498,9 @@ def extract_conclusion_date(text: str) -> Optional[datetime]:
         if dates:
             return max(dates)
 
+    # 3. dal ... al ...
     m = re.search(
-        r"dal\s+(\d{2}[/-]\d{2}[/-]\d{2,4}).{0,20}?al\s+(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        r"dal\s+(\d{2}[/-]\d{2}[/-]\d{2,4}).{0,30}?al\s+(\d{2}[/-]\d{2}[/-]\d{2,4})",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -428,14 +509,19 @@ def extract_conclusion_date(text: str) -> Optional[datetime]:
         if dt:
             return dt
 
+    # 4. ultima data plausibile escludendo nascita, emissione attestato
     all_dates = extract_dates(text)
     if not all_dates:
         return None
 
     birth_date = extract_birth_date(text)
 
-    emission_match = re.search(r"data emissione\s*:?[\s]*(\d{2}[/-]\d{2}[/-]\d{2,4})", text, re.IGNORECASE)
-    emission_date = parse_date(emission_match.group(1)) if emission_match else None
+    emission_match = re.search(
+        r"(data emissione|attestato emesso il)\s*:?[\s]*(\d{2}[/-]\d{2}[/-]\d{2,4})",
+        text,
+        re.IGNORECASE,
+    )
+    emission_date = parse_date(emission_match.group(2)) if emission_match else None
 
     valid = []
     for d in all_dates:
@@ -482,7 +568,7 @@ def parse_attestato(text: str, filename: str) -> dict:
     confidenza = "bassa"
     if nome and cognome and course_family != "CORSO_NON_RICONOSCIUTO" and conclusion_date:
         confidenza = "alta"
-    elif (nome or cognome) and conclusion_date:
+    elif (nome or cognome) and (course_family != "CORSO_NON_RICONOSCIUTO" or conclusion_date):
         confidenza = "media"
 
     suggested_name = build_attestato_filename(
@@ -555,12 +641,12 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
 def build_report_attestati(items: List[dict]) -> str:
     lines = []
     lines.append("REPORT ATTESTATI")
-    lines.append("=" * 80)
+    lines.append("=" * 100)
     lines.append("")
 
     for item in items:
         label = item.get("scadenza_label", "data_scadenza")
-        label_value = item.get("data_scadenza", "") or item.get("prossimo_aggiornamento", "")
+        label_value = first_non_empty(item.get("data_scadenza", ""), item.get("prossimo_aggiornamento", ""))
         lines.append(
             " | ".join([
                 item.get("suggested_filename", ""),
