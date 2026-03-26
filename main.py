@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
-from typing import List, Optional, Tuple, Annotated, Dict, Any
+from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
+from typing import List, Optional, Tuple, Annotated
 import fitz  # PyMuPDF
 import tempfile
 import zipfile
@@ -22,8 +22,7 @@ if creds_json:
         f.write(creds_json)
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp-key.json"
 
-
-app = FastAPI(title="Docu OCR Engine", version="2.0.0")
+app = FastAPI(title="Docu OCR Engine", version="2.1.0")
 
 
 # =========================
@@ -39,7 +38,6 @@ FOLDERS = {
     "altri_da_verificare": "altri_da_verificare",
 }
 
-# years = None -> nessuna scadenza automatica
 COURSE_RULES = {
     "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
     "FORMAZIONE_SPECIFICA": {"years": 5, "label": "data_scadenza"},
@@ -59,10 +57,19 @@ COURSE_RULES = {
 
 OCR_SOFT_LIMIT = int(os.getenv("OCR_SOFT_LIMIT", "800"))
 
-# Righe tipicamente spurie da screenshot / viewer / toolbar / tastiera
 NOISE_LINE_PATTERNS = [
     r"^accedi$",
     r"^condividi$",
+    r"^trova$",
+    r"^titolo \d+$",
+    r"^sottotitolo",
+    r"^sostituisci$",
+    r"^paragrafo$",
+    r"^stili$",
+    r"^abilita modifica$",
+    r"^seleziona$",
+    r"^modifica$",
+    r"^adobe$",
     r"^q cerca$",
     r"^trova testo o strumenti",
     r"^chiedi all",
@@ -84,60 +91,59 @@ NOISE_LINE_PATTERNS = [
     r"^rsist$",
     r"^000$",
     r"^000 punti",
+    r"^impostazioni di visualizzazione",
+    r"^focus$",
 ]
 
-ATTESATO_NAME_ANCHORS = [
+NAME_ANCHORS = [
     "conferito a",
     "rilasciato a",
     "si attesta che",
     "attesta che",
     "certifica che",
-    "certifica che",
     "ha partecipato",
     "ha frequentato",
 ]
 
-COURSE_KEYWORDS = {
-    "HACCP": [
-        "haccp",
-        "igiene degli alimenti",
-        "igiene alimentare",
-        "alimentarista",
-        "alimentaristi",
-        "settore alimentare",
-        "addetti del settore alimentare",
-        "addetti alla manipolazione di alimenti",
-        "manipolazione di alimenti",
-        "alimenti deperibili",
-        "regolamenti ce n. 852/2004",
-        "regolamento ce 852/2004",
-        "regolamento ce 853/2004",
-        "regime di temperature controllate",
-    ],
-    "AGGIORNAMENTO_FORMAZIONE_LAVORATORI": [
-        "aggiornamento della formazione per lavoratori",
-        "aggiornamento formazione lavoratori",
-        "corso di aggiornamento della formazione per lavoratori",
-        "corso di aggiornamento formazione lavoratori",
-    ],
-    "FORMAZIONE_SPECIFICA": [
-        "formazione specifica",
-        "parte specifica",
-        "rischio basso",
-        "rischio medio",
-        "rischio alto",
-    ],
-    "FORMAZIONE_GENERALE": [
-        "formazione generale",
-        "parte generale",
-    ],
+UPDATE_WORDS = [
+    "aggiornamento",
+    "refresh",
+    "rinnovo",
+    "retraining",
+    "update",
+    "periodico",
+    "modulo integrativo",
+]
+
+GENERIC_WORKER_TRAINING_PATTERNS = [
+    "aggiornamento della formazione per lavoratori",
+    "aggiornamento formazione lavoratori",
+    "corso di aggiornamento della formazione per lavoratori",
+    "corso di aggiornamento della formazione lavoratori",
+]
+
+SPECIFIC_COURSE_KEYWORDS = {
     "PRIMO_SOCCORSO": [
         "primo soccorso",
         "addetto al primo soccorso",
         "addetti al primo soccorso",
+        "incaricati al primo soccorso",
+        "lavoratori incaricati al primo soccorso",
+        "d.m. 388/03",
+        "gruppo b-c",
+        "gruppo b/c",
+    ],
+    "ANTINCENDIO": [
+        "antincendio",
+        "lotta antincendio",
+        "gestione emergenze incendio",
+        "addetto antincendio",
+        "addetti antincendio",
+        "incaricati antincendio",
     ],
     "PREPOSTO": [
         "preposto",
+        "corso preposto",
     ],
     "PONTEGGI": [
         "ponteggi",
@@ -155,12 +161,6 @@ COURSE_KEYWORDS = {
         "rspp datore di lavoro",
         "datore di lavoro che svolge i compiti del servizio di prevenzione e protezione",
     ],
-    "ANTINCENDIO": [
-        "antincendio",
-        "lotta antincendio",
-        "gestione emergenze incendio",
-        "addetto antincendio",
-    ],
     "CARRELLISTA": [
         "carrellista",
         "carrello elevatore",
@@ -177,20 +177,45 @@ COURSE_KEYWORDS = {
         "lavori in quota",
         "sistemi anticaduta",
     ],
+    "HACCP": [
+        "haccp",
+        "igiene degli alimenti",
+        "igiene alimentare",
+        "alimentarista",
+        "alimentaristi",
+        "settore alimentare",
+        "addetti del settore alimentare",
+        "addetti alla manipolazione di alimenti",
+        "manipolazione di alimenti",
+        "alimenti deperibili",
+        "regolamenti ce n. 852/2004",
+        "regolamento ce 852/2004",
+        "regolamento ce 853/2004",
+        "852/04",
+        "853/04",
+        "tipologia a",
+        "tipologia b",
+        "modulo integrativo",
+    ],
 }
 
-UPDATE_WORDS = [
-    "aggiornamento",
-    "refresh",
-    "rinnovo",
-    "retraining",
-    "update",
-    "periodico",
-]
+GENERAL_TRAINING_KEYWORDS = {
+    "FORMAZIONE_GENERALE": [
+        "formazione generale",
+        "parte generale",
+    ],
+    "FORMAZIONE_SPECIFICA": [
+        "formazione specifica",
+        "parte specifica",
+        "rischio basso",
+        "rischio medio",
+        "rischio alto",
+    ],
+}
 
 
 # =========================
-# HELPERS GENERALI
+# HELPERS TESTO
 # =========================
 
 def normalize_spaces(text: str) -> str:
@@ -247,23 +272,24 @@ def safe_filename(name: str) -> str:
     return name
 
 
+def unique_preserve_order(values: List[str]) -> List[str]:
+    seen = set()
+    out = []
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
+
+
+# =========================
+# HELPERS DATE
+# =========================
+
 def parse_date(date_str: str) -> Optional[datetime]:
     date_str = (date_str or "").strip()
-    for fmt in (
-        "%d/%m/%Y", "%d/%m/%y",
-        "%d-%m-%Y", "%d-%m-%y",
-        "%d.%m.%Y", "%d.%m.%y",
-        "%d/%-m/%Y", "%-d/%-m/%Y",  # non sempre supportati
-    ):
-        try:
-            dt = datetime.strptime(date_str, fmt)
-            if dt.year < 1970:
-                dt = dt.replace(year=dt.year + 100)
-            return dt
-        except Exception:
-            continue
 
-    # fallback robusto per date con 1 cifra
+    # fallback robusto per 1 o 2 cifre
     m = re.fullmatch(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", date_str)
     if m:
         d = int(m.group(1))
@@ -276,6 +302,14 @@ def parse_date(date_str: str) -> Optional[datetime]:
         except ValueError:
             return None
 
+    for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y", "%d.%m.%y"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            if dt.year < 1970:
+                dt = dt.replace(year=dt.year + 100)
+            return dt
+        except Exception:
+            continue
     return None
 
 
@@ -292,22 +326,19 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
         return dt.replace(month=2, day=28, year=dt.year + years)
 
 
-def first_non_empty(*values: str) -> str:
-    for v in values:
-        if v and str(v).strip():
-            return str(v).strip()
-    return ""
+def extract_dates(text: str) -> List[datetime]:
+    raw_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", text or "")
+    parsed = []
+    for d in raw_dates:
+        dt = parse_date(d)
+        if dt:
+            parsed.append(dt)
+    return parsed
 
 
-def unique_preserve_order(values: List[str]) -> List[str]:
-    seen = set()
-    out = []
-    for v in values:
-        if v not in seen:
-            seen.add(v)
-            out.append(v)
-    return out
-
+# =========================
+# HELPERS PERSONA
+# =========================
 
 def is_plausible_person_name_line(line: str) -> bool:
     raw = normalize_spaces(line)
@@ -319,13 +350,11 @@ def is_plausible_person_name_line(line: str) -> bool:
     if len(raw) < 5 or len(raw) > 80:
         return False
 
-    # no righe con molte cifre o caratteri da toolbar
     if re.search(r"\d{2,}", raw):
         return False
     if re.search(r"[<>{}\[\]|_=+/*\\]", raw):
         return False
 
-    # scarta righe che sembrano frasi o intestazioni
     forbidden = [
         "attestato",
         "corso",
@@ -346,6 +375,9 @@ def is_plausible_person_name_line(line: str) -> bool:
         "conferito",
         "certifica",
         "partecipazione",
+        "formazione",
+        "modulo",
+        "programma",
     ]
     if any(tok in line_norm for tok in forbidden):
         return False
@@ -356,7 +388,7 @@ def is_plausible_person_name_line(line: str) -> bool:
 
     letter_words = 0
     for w in words:
-        clean = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ'\-]", "", w)
+        clean = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ'’\-]", "", w)
         if len(clean) >= 2:
             letter_words += 1
     if letter_words < 2:
@@ -370,52 +402,9 @@ def split_name_line(line: str) -> Tuple[str, str]:
     if len(words) < 2:
         return "", ""
 
-    # Euristica semplice e coerente con molti attestati italiani:
-    # prima parola = nome, resto = cognome
     nome = words[0].title()
     cognome = " ".join(words[1:]).title()
     return nome, cognome
-
-
-def remove_noise_lines(text: str) -> str:
-    cleaned_lines = []
-    for line in (text or "").splitlines():
-        raw = normalize_spaces(line)
-        if not raw:
-            continue
-
-        line_norm = normalize_line_for_matching(raw)
-
-        # pattern noti
-        is_noise = False
-        for pat in NOISE_LINE_PATTERNS:
-            if re.search(pat, line_norm, re.IGNORECASE):
-                is_noise = True
-                break
-        if is_noise:
-            continue
-
-        # righe troppo "tecniche" o da tastiera
-        if re.fullmatch(r"[A-Za-z]?\d{1,2}[A-Za-z]?", raw):
-            continue
-        if len(raw) <= 2:
-            continue
-        if re.fullmatch(r"[\W_]+", raw):
-            continue
-
-        # righe con quasi solo simboli
-        letters = len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]", raw))
-        digits = len(re.findall(r"\d", raw))
-        if letters == 0 and digits <= 4:
-            continue
-
-        cleaned_lines.append(raw)
-
-    return normalize_spaces("\n".join(cleaned_lines))
-
-
-def build_debug_notes() -> List[str]:
-    return []
 
 
 # =========================
@@ -474,6 +463,45 @@ def ocr_pdf_pages(content: bytes) -> Tuple[str, int]:
             texts.append(page_text)
 
     return normalize_spaces("\n\n".join(texts)), len(page_images)
+
+
+# =========================
+# PULIZIA OCR
+# =========================
+
+def remove_noise_lines(text: str) -> str:
+    cleaned_lines = []
+
+    for line in (text or "").splitlines():
+        raw = normalize_spaces(line)
+        if not raw:
+            continue
+
+        line_norm = normalize_line_for_matching(raw)
+
+        is_noise = False
+        for pat in NOISE_LINE_PATTERNS:
+            if re.search(pat, line_norm, re.IGNORECASE):
+                is_noise = True
+                break
+        if is_noise:
+            continue
+
+        if len(raw) <= 2:
+            continue
+        if re.fullmatch(r"[\W_]+", raw):
+            continue
+        if re.fullmatch(r"[A-Za-z]?\d{1,2}[A-Za-z]?", raw):
+            continue
+
+        letters = len(re.findall(r"[A-Za-zÀ-ÖØ-öø-ÿ]", raw))
+        digits = len(re.findall(r"\d", raw))
+        if letters == 0 and digits <= 4:
+            continue
+
+        cleaned_lines.append(raw)
+
+    return normalize_spaces("\n".join(cleaned_lines))
 
 
 # =========================
@@ -578,7 +606,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
         "documenti_aziendali": 0,
     }
 
-    # Attestati
     if "attestato" in blob:
         scores["attestati"] += 5
     if "corso" in blob:
@@ -589,16 +616,9 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
         scores["attestati"] += 2
     if "verifica dell'apprendimento" in blob or "verifica dell apprendimento" in blob:
         scores["attestati"] += 2
-    if "haccp" in blob:
-        scores["attestati"] += 3
-    if "settore alimentare" in blob:
-        scores["attestati"] += 3
-    if "data di conclusione del corso" in blob:
+    if "data di svolgimento del corso" in blob or "data di conclusione del corso" in blob:
         scores["attestati"] += 2
-    if "attestato emesso" in blob:
-        scores["attestati"] += 1
 
-    # Nomine
     if "nomina" in blob:
         scores["nomine"] += 5
     if "designazione" in blob:
@@ -608,7 +628,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "preposto" in blob:
         scores["nomine"] += 2
 
-    # Visite mediche
     if "giudizio di idoneita" in blob or "giudizio di idoneità" in blob:
         scores["visite_mediche"] += 5
     if "medico competente" in blob:
@@ -618,7 +637,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "sorveglianza sanitaria" in blob:
         scores["visite_mediche"] += 2
 
-    # DPI
     if re.search(r"\bdpi\b", blob):
         scores["verbali_dpi"] += 5
     if "dispositivi di protezione individuale" in blob:
@@ -628,7 +646,6 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
     if "firma per ricevuta" in blob:
         scores["verbali_dpi"] += 2
 
-    # Documenti aziendali
     if re.search(r"\bdvr\b", blob):
         scores["documenti_aziendali"] += 5
     if "valutazione dei rischi" in blob:
@@ -648,7 +665,7 @@ def score_category(text: str, filename: str) -> Tuple[str, dict]:
 
 
 # =========================
-# ESTRAZIONE DATI ATTESTATI
+# PARSER ATTESTATI
 # =========================
 
 def extract_title_block(text: str) -> str:
@@ -662,73 +679,52 @@ def extract_title_block(text: str) -> str:
     return normalize_text_for_matching(" ".join(title_lines))
 
 
+def has_any_keyword(blob: str, keywords: List[str]) -> bool:
+    blob_padded = f" {blob} "
+    for kw in keywords:
+        k = normalize_text_for_matching(kw)
+        if k in blob or k in blob_padded:
+            return True
+    return False
+
+
 def detect_course_family(text: str, filename: str) -> Tuple[str, str, List[str]]:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
     title_blob = extract_title_block(text)
     debug = []
 
-    def has_any(needles: List[str], haystack: str) -> bool:
-        haystack_pad = f" {haystack} "
-        for n in needles:
-            n_norm = normalize_text_for_matching(n)
-            if n_norm in haystack or n_norm in haystack_pad:
-                return True
-        return False
-
     is_update = any(w in blob for w in UPDATE_WORDS)
 
-    # ordine importante: prima casi più specifici
-    if has_any(COURSE_KEYWORDS["HACCP"], blob):
-        debug.append("match corso: HACCP")
-        return "HACCP", "aggiornamento" if is_update else "base", debug
+    # 1. corsi specifici: devono vincere SEMPRE sui generici
+    for family in [
+        "PRIMO_SOCCORSO",
+        "ANTINCENDIO",
+        "PREPOSTO",
+        "PONTEGGI",
+        "RLS",
+        "RSPP_DL",
+        "CARRELLISTA",
+        "PLE",
+        "LAVORI_IN_QUOTA",
+        "HACCP",
+    ]:
+        if has_any_keyword(blob, SPECIFIC_COURSE_KEYWORDS[family]) or has_any_keyword(title_blob, SPECIFIC_COURSE_KEYWORDS[family]):
+            debug.append(f"match corso specifico: {family}")
+            return family, "aggiornamento" if is_update else "base", debug
 
-    if has_any(COURSE_KEYWORDS["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"], blob):
+    # 2. formazione lavoratori GENERICA
+    # solo se NON ci sono indicatori di corso specifico
+    if has_any_keyword(blob, GENERIC_WORKER_TRAINING_PATTERNS):
         debug.append("match corso: AGGIORNAMENTO_FORMAZIONE_LAVORATORI")
         return "AGGIORNAMENTO_FORMAZIONE_LAVORATORI", "aggiornamento", debug
 
-    if has_any(COURSE_KEYWORDS["FORMAZIONE_SPECIFICA"], blob) or has_any(COURSE_KEYWORDS["FORMAZIONE_SPECIFICA"], title_blob):
+    if has_any_keyword(blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"]) or has_any_keyword(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"]):
         debug.append("match corso: FORMAZIONE_SPECIFICA")
         return "FORMAZIONE_SPECIFICA", "aggiornamento" if is_update else "base", debug
 
-    if has_any(COURSE_KEYWORDS["FORMAZIONE_GENERALE"], blob):
+    if has_any_keyword(blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"]):
         debug.append("match corso: FORMAZIONE_GENERALE")
         return "FORMAZIONE_GENERALE", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["PRIMO_SOCCORSO"], blob):
-        debug.append("match corso: PRIMO_SOCCORSO")
-        return "PRIMO_SOCCORSO", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["PREPOSTO"], blob):
-        debug.append("match corso: PREPOSTO")
-        return "PREPOSTO", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["PONTEGGI"], blob):
-        debug.append("match corso: PONTEGGI")
-        return "PONTEGGI", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["RLS"], f" {blob} "):
-        debug.append("match corso: RLS")
-        return "RLS", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["RSPP_DL"], blob):
-        debug.append("match corso: RSPP_DL")
-        return "RSPP_DL", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["ANTINCENDIO"], blob):
-        debug.append("match corso: ANTINCENDIO")
-        return "ANTINCENDIO", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["CARRELLISTA"], blob):
-        debug.append("match corso: CARRELLISTA")
-        return "CARRELLISTA", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["PLE"], f" {blob} "):
-        debug.append("match corso: PLE")
-        return "PLE", "aggiornamento" if is_update else "base", debug
-
-    if has_any(COURSE_KEYWORDS["LAVORI_IN_QUOTA"], blob):
-        debug.append("match corso: LAVORI_IN_QUOTA")
-        return "LAVORI_IN_QUOTA", "aggiornamento" if is_update else "base", debug
 
     debug.append("corso non riconosciuto")
     return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", debug
@@ -739,17 +735,16 @@ def extract_name_from_attestato(text: str) -> Tuple[str, str, List[str]]:
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
-    # 1) prova regex inline dopo anchor
-    anchors_regex = "|".join(re.escape(a) for a in ATTESATO_NAME_ANCHORS)
+    anchors_regex = "|".join(re.escape(a) for a in NAME_ANCHORS)
     m = re.search(
-        rf"(?:{anchors_regex})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]{{5,70}})",
+        rf"(?:{anchors_regex})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]{{5,80}})",
         clean_text,
         re.IGNORECASE,
     )
     if m:
         raw = normalize_spaces(m.group(1))
         raw = re.split(
-            r"\b(nato a|nata a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|attestato emesso)\b",
+            r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione)\b",
             raw,
             flags=re.IGNORECASE,
         )[0].strip(" ,.;:-")
@@ -759,23 +754,19 @@ def extract_name_from_attestato(text: str) -> Tuple[str, str, List[str]]:
                 debug.append("nome trovato con regex dopo anchor")
                 return nome, cognome, debug
 
-    # 2) cerca anchor su riga e poi guarda le 3 righe successive
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
-        if any(anchor in line_norm for anchor in ATTESATO_NAME_ANCHORS):
-            candidates = lines[i:i + 5]
-            for cand in candidates[1:]:
+        if any(anchor in line_norm for anchor in NAME_ANCHORS):
+            for cand in lines[i + 1:i + 5]:
                 if is_plausible_person_name_line(cand):
                     nome, cognome = split_name_line(cand)
                     if nome and cognome:
                         debug.append("nome trovato nelle righe successive ad anchor")
                         return nome, cognome, debug
 
-    # 3) riga precedente a "nato/nata"
     for i, line in enumerate(lines):
-        if re.search(r"\bnato\/?a?\b|\bnata\/?a?\b|\bnato a\b|\bnata a\b", line, re.IGNORECASE):
-            prev_candidates = lines[max(0, i - 3):i]
-            prev_candidates = list(reversed(prev_candidates))
+        if re.search(r"\bnato\b|\bnata\b|\bnato\/a\b", line, re.IGNORECASE):
+            prev_candidates = list(reversed(lines[max(0, i - 3):i]))
             for prev in prev_candidates:
                 if is_plausible_person_name_line(prev):
                     nome, cognome = split_name_line(prev)
@@ -783,9 +774,7 @@ def extract_name_from_attestato(text: str) -> Tuple[str, str, List[str]]:
                         debug.append("nome trovato prima di riga con nato/nata")
                         return nome, cognome, debug
 
-    # 4) cerca una riga plausibile nelle prime righe centrali del documento
-    focus_lines = lines[:35]
-    for cand in focus_lines:
+    for cand in lines[:35]:
         if is_plausible_person_name_line(cand):
             nome, cognome = split_name_line(cand)
             if nome and cognome:
@@ -798,7 +787,7 @@ def extract_name_from_attestato(text: str) -> Tuple[str, str, List[str]]:
 
 def extract_birth_date(text: str) -> Optional[datetime]:
     patterns = [
-        r"(nato a|nata a|nato\/a a).*?(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+        r"(nato a|nata a|nato\/a a|nato in|nata in).*?(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         r"(nato il|nata il|data di nascita).*?(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
     ]
     for pat in patterns:
@@ -808,32 +797,18 @@ def extract_birth_date(text: str) -> Optional[datetime]:
     return None
 
 
-def extract_dates(text: str) -> List[datetime]:
-    raw_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", text)
-    parsed = []
-    for d in raw_dates:
-        dt = parse_date(d)
-        if dt:
-            parsed.append(dt)
-    return parsed
-
-
 def find_date_near_labels(lines: List[str], labels: List[str]) -> Optional[datetime]:
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
-
         if any(lbl in line_norm for lbl in labels):
-            # stessa riga
             same_line_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", line)
             for d in same_line_dates:
                 dt = parse_date(d)
                 if dt:
                     return dt
 
-            # righe successive immediate
             for j in range(i + 1, min(i + 3, len(lines))):
-                near = lines[j]
-                near_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", near)
+                near_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", lines[j])
                 for d in near_dates:
                     dt = parse_date(d)
                     if dt:
@@ -845,7 +820,6 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
     debug = []
     lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
 
-    # 1. priorità assoluta: label esplicita
     label_groups = [
         [
             "data di conclusione del corso",
@@ -854,11 +828,17 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
             "data conclusione",
         ],
         [
+            "data di svolgimento del corso",
+            "data di svolgimento",
+            "data svolgimento corso",
+            "svolgimento del corso",
+        ],
+        [
             "data fine corso",
             "fine corso",
             "terminato il",
             "concluso il",
-        ]
+        ],
     ]
 
     for labels in label_groups:
@@ -867,11 +847,12 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
             debug.append(f"data conclusione trovata vicino a label: {labels[0]}")
             return dt, debug
 
-    # 2. regex multiline diretta
     patterns = [
         r"data di conclusione del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         r"conclusione del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         r"data conclusione corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+        r"data di svolgimento del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+        r"data di svolgimento\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         r"data fine corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
     ]
     for pattern in patterns:
@@ -882,9 +863,8 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
                 debug.append("data conclusione trovata con regex diretta")
                 return dt, debug
 
-    # 3. periodo svolgimento -> prende ultima data del blocco
     m = re.search(
-        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso|dal|durata del corso)(.+?)(data emissione|attestato emesso|programma del corso|responsabile del progetto formativo|$)",
+        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso|dal|durata del corso)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -895,9 +875,8 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
             debug.append("data conclusione ricavata da blocco periodo corso")
             return max(dates), debug
 
-    # 4. dal ... al ...
     m = re.search(
-        r"dal\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}).{0,60}?al\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+        r"dal\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}).{0,80}?al\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         text,
         re.IGNORECASE | re.DOTALL,
     )
@@ -907,7 +886,6 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
             debug.append("data conclusione ricavata da pattern dal/al")
             return dt, debug
 
-    # 5. fallback: date plausibili filtrando nascita, emissione, oggi screenshot
     all_dates = extract_dates(text)
     if not all_dates:
         debug.append("nessuna data trovata")
@@ -928,11 +906,8 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str]]:
             continue
         if emission_date and d.date() == emission_date.date():
             continue
-
-        # scarta date troppo future o troppo vecchie in modo assurdo
         if d.year < 1990 or d.year > datetime.now().year + 1:
             continue
-
         valid.append(d)
 
     if valid:
@@ -990,7 +965,7 @@ def compute_review_flag(
 
 
 def parse_attestato(text: str, filename: str) -> dict:
-    debug_notes = build_debug_notes()
+    debug_notes = []
 
     nome, cognome, name_debug = extract_name_from_attestato(text)
     debug_notes.extend(name_debug)
@@ -1003,7 +978,6 @@ def parse_attestato(text: str, filename: str) -> dict:
 
     scad_label, scad_value = compute_scadenza(course_family, conclusion_date)
 
-    # confidenza
     points = 0
     if nome and cognome:
         points += 3
@@ -1092,7 +1066,6 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
         "parser_debug": [],
     }
 
-    # se estrazione fallita, evita 500 e restituisci JSON pulito
     if extraction["extraction_method"] == "extraction_failed":
         result["categoria"] = "altri_da_verificare"
         result["cartella"] = FOLDERS["altri_da_verificare"]
@@ -1112,6 +1085,13 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> dict:
 # =========================
 # ZIP + REPORT
 # =========================
+
+def first_non_empty(*values: str) -> str:
+    for v in values:
+        if v and str(v).strip():
+            return str(v).strip()
+    return ""
+
 
 def build_report_attestati(items: List[dict]) -> str:
     lines = []
@@ -1158,12 +1138,7 @@ def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[dict]) 
 
             suggested = item.get("suggested_filename", safe_filename(upload_file.filename))
             if not suggested.lower().endswith(ext.lower()):
-                # mantieni estensione originale per file non attestati
-                if folder != "attestati":
-                    suggested = os.path.splitext(suggested)[0] + ext
-                else:
-                    # per attestati, se l'origine è immagine mantieni estensione immagine
-                    suggested = os.path.splitext(suggested)[0] + ext
+                suggested = os.path.splitext(suggested)[0] + ext
 
             zip_path = f"{folder}/{suggested}"
             zf.writestr(zip_path, content)
@@ -1185,10 +1160,31 @@ def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[dict]) 
 
 @app.get("/")
 def home():
-    return {
-        "status": "ok",
-        "message": "Docu OCR Engine online"
-    }
+    return {"status": "ok", "message": "Docu OCR Engine online"}
+
+
+@app.get("/upload", response_class=HTMLResponse)
+def upload_page():
+    return """
+    <html>
+      <head>
+        <title>Upload Attestati</title>
+      </head>
+      <body style="font-family:Arial;padding:40px;">
+        <h2>Carica attestato singolo</h2>
+        <form action="/analyze" enctype="multipart/form-data" method="post">
+          <input name="file" type="file" />
+          <button type="submit">Analizza</button>
+        </form>
+        <hr>
+        <h2>Carica più file</h2>
+        <form action="/organize-zip" enctype="multipart/form-data" method="post">
+          <input name="files" type="file" multiple />
+          <button type="submit">Organizza ZIP</button>
+        </form>
+      </body>
+    </html>
+    """
 
 
 @app.post("/analyze")
