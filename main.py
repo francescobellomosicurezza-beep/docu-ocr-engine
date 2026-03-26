@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from typing import List, Optional, Tuple, Annotated
@@ -23,7 +24,13 @@ if creds_json:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp-key.json"
 
 app = FastAPI(title="Docu OCR Engine", version="2.1.0")
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # per test iniziali
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # =========================
 # CONFIG
