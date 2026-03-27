@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 from typing import List, Optional, Tuple, Dict, Any, Annotated
@@ -9,6 +9,7 @@ import io
 import os
 import re
 import unicodedata
+import json
 from datetime import datetime
 from google.cloud import vision
 
@@ -28,11 +29,11 @@ if creds_json:
 # APP
 # =========================================================
 
-app = FastAPI(title="Docu OCR Engine", version="4.0.0")
+app = FastAPI(title="Docu OCR Engine", version="5.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # restringere in produzione
+    allow_origins=["*"],  # restringere in produzione
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,6 +60,22 @@ CATEGORY_LABELS = {
     "verbali_dpi": "Verbali DPI",
     "documenti_aziendali": "Documenti Aziendali",
     "altri_da_verificare": "Da verificare",
+}
+
+CATEGORY_LABEL_TO_KEY = {
+    "attestati": "attestati",
+    "attestato": "attestati",
+    "nomine": "nomine",
+    "nomina": "nomine",
+    "visite mediche": "visite_mediche",
+    "visita medica": "visite_mediche",
+    "verbali dpi": "verbali_dpi",
+    "verbale dpi": "verbali_dpi",
+    "documenti aziendali": "documenti_aziendali",
+    "documento aziendale": "documenti_aziendali",
+    "da verificare": "altri_da_verificare",
+    "altri_da_verificare": "altri_da_verificare",
+    "altri da verificare": "altri_da_verificare",
 }
 
 COURSE_RULES = {
@@ -898,9 +915,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         "negative_hits": [],
     }
 
-    # ---------------------
-    # ATTESTATI
-    # ---------------------
     attestato_hits = count_keywords(blob, ATTESTATO_POSITIVE_SIGNALS)
     if attestato_hits >= 2:
         scores["attestati"] += attestato_hits * 2
@@ -917,9 +931,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["attestati"] += 2
         debug["positive_hits"].append("attestati:+2 programma + formulazione tipica")
 
-    # ---------------------
-    # NOMINE
-    # ---------------------
     if "nomina" in blob:
         scores["nomine"] += 6
         debug["positive_hits"].append("nomine:+6 nomina")
@@ -937,9 +948,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         if has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
-    # ---------------------
-    # VISITE MEDICHE
-    # ---------------------
     if "giudizio di idoneita" in blob or "giudizio di idoneità" in blob:
         scores["visite_mediche"] += 7
         debug["positive_hits"].append("visite:+7 giudizio di idoneità")
@@ -955,9 +963,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "idoneo" in blob or "idonea" in blob:
         scores["visite_mediche"] += 2
 
-    # ---------------------
-    # VERBALI DPI
-    # ---------------------
     if re.search(r"\bdpi\b", blob):
         scores["verbali_dpi"] += 5
         debug["positive_hits"].append("dpi:+5 sigla DPI")
@@ -973,9 +978,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "firma per ricevuta" in blob:
         scores["verbali_dpi"] += 3
 
-    # ---------------------
-    # DOCUMENTI AZIENDALI
-    # ---------------------
     if re.search(r"\bdvr\b", blob):
         scores["documenti_aziendali"] += 5
     if "valutazione dei rischi" in blob:
@@ -991,9 +993,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "protocollo" in blob:
         scores["documenti_aziendali"] += 2
 
-    # ---------------------
-    # PENALITÀ
-    # ---------------------
     for neg in ATTESTATO_NEGATIVE_SIGNALS:
         if neg in blob:
             scores["attestati"] -= 2
@@ -1066,7 +1065,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
 
     is_update = any(w in full_blob for w in UPDATE_WORDS)
 
-    # CORSI SPECIFICI - peso forte sul titolo, più debole nel body
     for family in [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
@@ -1095,7 +1093,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         if body_hits:
             debug.append(f"{family}: +{body_hits} match corpo")
 
-    # GENERICI LAVORATORI
     fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
     fg_body = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
     fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
@@ -1114,7 +1111,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     if fl_title:
         debug.append(f"AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +{fl_title * 7} match titolo")
 
-    # Rafforzamenti ragionati
     if "formazione generale" in title_blob:
         scores["FORMAZIONE_GENERALE"] += 4
         debug.append("FORMAZIONE_GENERALE: +4 boost titolo esplicito")
@@ -1125,12 +1121,11 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += 5
         debug.append("AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +5 boost aggiornamento titolo")
 
-    # Penalità anti-falsi-positivi: keyword nel programma non deve battere un titolo chiaro
     if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= 8:
         for family in ["PRIMO_SOCCORSO", "ANTINCENDIO", "PREPOSTO"]:
             if scores[family] > 0 and count_keywords(title_blob, SPECIFIC_COURSE_KEYWORDS[family]) == 0:
                 scores[family] -= 3
-                debug.append(f"{family}: -3 penalità perché match solo nel corpo contro titolo lavoratori")
+                debug.append(f"{family}: -3 penalità match solo nel corpo contro titolo lavoratori")
 
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_family, best_score = ordered[0]
@@ -1145,7 +1140,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
 
 
 # =========================================================
-# ESTRAZIONE DATE PESATE
+# DATE PESATE
 # =========================================================
 
 def build_date_candidates(text: str) -> List[Dict[str, Any]]:
@@ -1157,7 +1152,7 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
         if not found:
             continue
 
-        context_window = " ".join(lines[max(0, i - 1): min(len(lines), i + 2)])
+        context_window = " ".join(lines[max(0, i - 2): min(len(lines), i + 3)])
         context_norm = normalize_text_for_matching(context_window)
 
         for raw_date in found:
@@ -1168,25 +1163,23 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
             score = 0
             reasons = []
 
-            # positive
             if any(lbl in context_norm for lbl in DATE_STRONG_LABELS):
-                score += 8
+                score += 15
                 reasons.append("strong_label")
+
             if any(lbl in context_norm for lbl in DATE_WEAK_PERIOD_LABELS):
-                score += 4
+                score += 5
                 reasons.append("period_label")
 
-            # negative
             if any(neg in context_norm for neg in DATE_NEGATIVE_CONTEXTS):
-                score -= 7
+                score -= 20
                 reasons.append("negative_context")
 
-            # plausibility
             if 1990 <= dt.year <= datetime.now().year + 1:
                 score += 1
                 reasons.append("year_plausible")
             else:
-                score -= 5
+                score -= 10
                 reasons.append("year_implausible")
 
             candidates.append({
@@ -1194,7 +1187,7 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
                 "date": dt,
                 "line_index": i,
                 "line": line[:200],
-                "context": context_window[:300],
+                "context": context_window[:400],
                 "score": score,
                 "reasons": reasons,
             })
@@ -1216,11 +1209,17 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
     for c in candidates:
         dt = c["date"]
         if birth_date and dt.date() == birth_date.date():
-            c["score"] -= 8
+            c["score"] -= 25
             c["reasons"].append("birth_date_penalty")
         filtered.append(c)
 
-    # Caso speciale: se c'è un blocco periodo corso / giorni, prendiamo l'ultima del blocco
+    strong_candidates = [c for c in filtered if "strong_label" in c["reasons"] and c["score"] >= 10]
+    if strong_candidates:
+        strong_candidates = sorted(strong_candidates, key=lambda x: (x["score"], x["date"]), reverse=True)
+        best = strong_candidates[0]
+        debug.append(f"data conclusione scelta da strong_label: {best['raw']}")
+        return best["date"], debug, "strong_score", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
+
     period_block_match = re.search(
         r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
@@ -1232,28 +1231,24 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
         if period_dates:
             dt = max(period_dates)
             debug.append("data conclusione scelta come ultima data di blocco periodo")
-            return dt, debug, "period_block", filtered
+            return dt, debug, "period_block", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
-    ordered = sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
-    best = ordered[0]
-
-    if best["score"] >= 8:
-        debug.append(f"data conclusione scelta con score forte: {best['raw']}")
-        return best["date"], debug, "strong_score", ordered
-
-    # fallback su date plausibili positive
-    positive = [c for c in ordered if c["score"] >= 1]
+    positive = [
+        c for c in filtered
+        if c["score"] >= 1 and "negative_context" not in c["reasons"]
+    ]
     if positive:
+        positive = sorted(positive, key=lambda x: (x["score"], x["date"]), reverse=True)
         best = positive[0]
         debug.append(f"data conclusione scelta con fallback positivo: {best['raw']}")
-        return best["date"], debug, "weak_positive", ordered
+        return best["date"], debug, "weak_positive", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
     debug.append("nessuna data conclusione affidabile")
-    return None, debug, "none", ordered
+    return None, debug, "none", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
 
 # =========================================================
-# HELPERS SCADENZA / FILENAME
+# HELPERS FILENAME / SCADENZA
 # =========================================================
 
 def compute_scadenza(course_family: str, conclusion_date: Optional[datetime]) -> Tuple[str, str]:
@@ -1739,13 +1734,56 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
 
     result["cartella"] = FOLDERS.get(category, "altri_da_verificare")
 
-    # ulteriore sicurezza: classifica ambigua => review
     if category_meta.get("delta", 99) <= 1:
         result["needs_review"] = True
         if "classificazione_ambigua" not in result["review_reasons"]:
             result["review_reasons"].append("classificazione_ambigua")
 
     return result
+
+
+# =========================================================
+# OVERRIDE CATEGORIA DA FRONTEND (OPZIONALE)
+# =========================================================
+
+def normalize_category_override(value: str) -> Optional[str]:
+    if not value:
+        return None
+    key = normalize_text_for_matching(value)
+    return CATEGORY_LABEL_TO_KEY.get(key)
+
+
+def apply_category_override(item: Dict[str, Any], forced_category: Optional[str]) -> Dict[str, Any]:
+    if not forced_category:
+        return item
+
+    filename = item.get("filename", "")
+    ext = os.path.splitext(filename)[1] or ".pdf"
+
+    item["categoria"] = forced_category
+    item["categoria_label"] = CATEGORY_LABELS.get(forced_category, "Da verificare")
+    item["cartella"] = FOLDERS.get(forced_category, "altri_da_verificare")
+
+    if forced_category == "documenti_aziendali":
+        item["categoria"] = "documenti_aziendali"
+        item["categoria_label"] = "Documenti Aziendali"
+        item["corso"] = ""
+        item["famiglia_corso"] = ""
+        item["tipo_percorso"] = ""
+        item["data_scadenza"] = ""
+        item["prossimo_aggiornamento"] = ""
+        item["scadenza_label"] = ""
+        item["suggested_filename"] = safe_filename(os.path.splitext(filename)[0]) + ext
+
+    elif forced_category == "altri_da_verificare":
+        item["categoria"] = "altri_da_verificare"
+        item["categoria_label"] = "Da verificare"
+        item["needs_review"] = True
+        if "override_manuale_frontend" not in item["review_reasons"]:
+            item["review_reasons"].append("override_manuale_frontend")
+        item["suggested_filename"] = safe_filename(os.path.splitext(filename)[0]) + ext
+
+    return item
 
 
 # =========================================================
@@ -1839,6 +1877,29 @@ async def analyze_upload(file: UploadFile) -> Dict[str, Any]:
     return analyze_document(file.filename, content, file.content_type or "")
 
 
+def parse_overrides_json(overrides_json: Optional[str]) -> Dict[str, str]:
+    if not overrides_json:
+        return {}
+
+    try:
+        raw = json.loads(overrides_json)
+    except Exception:
+        return {}
+
+    if not isinstance(raw, dict):
+        return {}
+
+    normalized = {}
+    for filename, category_value in raw.items():
+        if not isinstance(filename, str):
+            continue
+        forced = normalize_category_override(str(category_value))
+        if forced:
+            normalized[filename] = forced
+
+    return normalized
+
+
 # =========================================================
 # ENDPOINTS
 # =========================================================
@@ -1848,7 +1909,7 @@ def home():
     return {
         "status": "ok",
         "message": "Docu OCR Engine online",
-        "version": "4.0.0"
+        "version": "5.0.0"
     }
 
 
@@ -1873,7 +1934,7 @@ def upload_page():
 
         <hr>
 
-        <h2>Analizza più file (JSON, nessun ZIP automatico)</h2>
+        <h2>Analizza più file (JSON)</h2>
         <form action="/analyze-batch" enctype="multipart/form-data" method="post">
           <input name="files" type="file" multiple />
           <button type="submit">Analizza batch</button>
@@ -1881,9 +1942,10 @@ def upload_page():
 
         <hr>
 
-        <h2>Organizza archivio ZIP</h2>
+        <h2>Scarica ZIP (richiede conferma esplicita)</h2>
         <form action="/organize-zip" enctype="multipart/form-data" method="post">
           <input name="files" type="file" multiple />
+          <input type="hidden" name="confirm_download" value="true" />
           <button type="submit">Scarica ZIP</button>
         </form>
       </body>
@@ -1985,17 +2047,35 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
 
 
 @app.post("/organize-zip")
-async def organize_zip(files: Annotated[List[UploadFile], File(...)]):
+async def organize_zip(
+    files: Annotated[List[UploadFile], File(...)],
+    confirm_download: Annotated[str, Form(...)],
+    overrides_json: Annotated[Optional[str], Form()] = None,
+):
+    # PROTEZIONE SERVER-SIDE CONTRO ZIP AUTOMATICO
+    if str(confirm_download).strip().lower() != "true":
+        raise HTTPException(
+            status_code=400,
+            detail="confirm_download=true richiesto per generare lo ZIP"
+        )
+
     if not files:
         raise HTTPException(status_code=400, detail="Nessun file caricato")
+
+    overrides_map = parse_overrides_json(overrides_json)
 
     files_data: List[Tuple[UploadFile, bytes]] = []
     analyzed: List[Dict[str, Any]] = []
 
     for file in files:
         content = await file.read()
+        item = analyze_document(file.filename, content, file.content_type or "")
+
+        forced_category = overrides_map.get(file.filename)
+        item = apply_category_override(item, forced_category)
+
         files_data.append((file, content))
-        analyzed.append(analyze_document(file.filename, content, file.content_type or ""))
+        analyzed.append(item)
 
     zip_buffer = build_zip(files_data, analyzed)
 
