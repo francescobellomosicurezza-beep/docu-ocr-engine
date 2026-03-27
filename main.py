@@ -1,7 +1,7 @@
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
-from typing import List, Optional, Tuple, Annotated, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Annotated
 import fitz  # PyMuPDF
 import tempfile
 import zipfile
@@ -13,9 +13,9 @@ from datetime import datetime
 from google.cloud import vision
 
 
-# =========================
+# =========================================================
 # GCP CREDS
-# =========================
+# =========================================================
 
 creds_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 if creds_json:
@@ -24,20 +24,24 @@ if creds_json:
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/gcp-key.json"
 
 
-app = FastAPI(title="Docu OCR Engine", version="3.0.0")
+# =========================================================
+# APP
+# =========================================================
+
+app = FastAPI(title="Docu OCR Engine", version="4.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # per test iniziali; restringere in produzione
+    allow_origins=["*"],   # restringere in produzione
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
 FOLDERS = {
     "attestati": "attestati",
@@ -46,6 +50,15 @@ FOLDERS = {
     "verbali_dpi": "verbali_dpi",
     "documenti_aziendali": "documenti_aziendali",
     "altri_da_verificare": "altri_da_verificare",
+}
+
+CATEGORY_LABELS = {
+    "attestati": "Attestati",
+    "nomine": "Nomine",
+    "visite_mediche": "Visite Mediche",
+    "verbali_dpi": "Verbali DPI",
+    "documenti_aziendali": "Documenti Aziendali",
+    "altri_da_verificare": "Da verificare",
 }
 
 COURSE_RULES = {
@@ -69,9 +82,9 @@ COURSE_RULES = {
 OCR_SOFT_LIMIT = int(os.getenv("OCR_SOFT_LIMIT", "800"))
 
 
-# =========================
-# COSTANTI PARSING
-# =========================
+# =========================================================
+# COSTANTI TESTO / PARSING
+# =========================================================
 
 NOISE_LINE_PATTERNS = [
     r"^accedi$",
@@ -92,7 +105,6 @@ NOISE_LINE_PATTERNS = [
     r"^password ?\d*$",
     r"^lenovo$",
     r"^\d{1,2}:\d{2}$",
-    r"^\d{1,2}/\d{1,2}/\d{4}$",
     r"^f\d{1,2}$",
     r"^pag$",
     r"^ins$",
@@ -128,6 +140,7 @@ INVALID_NAME_TOKENS = {
     "nato", "nata", "nato/a", "nata/a",
     "attestato", "corso", "data", "luogo", "n", "nr",
     "conferito", "rilasciato", "certifica", "attesta",
+    "ai", "sensi", "della", "del", "dei"
 }
 
 UPDATE_WORDS = [
@@ -138,6 +151,7 @@ UPDATE_WORDS = [
     "update",
     "periodico",
     "modulo integrativo",
+    "agg.to",
 ]
 
 GENERIC_WORKER_TRAINING_PATTERNS = [
@@ -145,6 +159,8 @@ GENERIC_WORKER_TRAINING_PATTERNS = [
     "aggiornamento formazione lavoratori",
     "corso di aggiornamento della formazione per lavoratori",
     "corso di aggiornamento della formazione lavoratori",
+    "formazione dei lavoratori",
+    "formazione lavoratori",
 ]
 
 SPECIFIC_COURSE_KEYWORDS = {
@@ -168,9 +184,6 @@ SPECIFIC_COURSE_KEYWORDS = {
         "addetto antincendio",
         "addetti antincendio",
         "incaricati antincendio",
-        "rischio medio",
-        "rischio elevato",
-        "rischio basso",
     ],
     "PREPOSTO": [
         "preposto",
@@ -187,6 +200,7 @@ SPECIFIC_COURSE_KEYWORDS = {
         "rappresentante dei lavoratori per la sicurezza",
         " rls ",
         "r.l.s",
+        "aggiornamento rls",
     ],
     "RSPP_DL": [
         "datore di lavoro rspp",
@@ -246,9 +260,6 @@ GENERAL_TRAINING_KEYWORDS = {
         "rischio basso",
         "rischio medio",
         "rischio alto",
-        "formazione per i lavoratori",
-        "attivita a rischio alto",
-        "attività a rischio alto",
     ],
 }
 
@@ -261,32 +272,82 @@ NOMINA_ROLE_KEYWORDS = {
 }
 
 VISITA_ESITI = [
-    "idoneo",
-    "idonea",
     "idoneo con prescrizioni",
     "idonea con prescrizioni",
-    "non idoneo",
-    "non idonea",
     "temporaneamente non idoneo",
     "temporaneamente non idonea",
+    "non idoneo",
+    "non idonea",
+    "idoneo",
+    "idonea",
 ]
 
-ATTESTATO_REQUIRED_SIGNALS = [
+ATTESTATO_POSITIVE_SIGNALS = [
     "attestato",
-    "partecipazione",
+    "attestato di frequenza",
+    "attestato di formazione",
+    "si attesta che",
+    "certifica che",
+    "ha frequentato",
+    "ha partecipato",
     "verifica dell'apprendimento",
     "verifica apprendimento",
-    "data di svolgimento del corso",
-    "data di conclusione del corso",
-    "attestato emesso",
     "rilasciato",
     "conferito",
+    "programma del corso",
+]
+
+ATTESTATO_NEGATIVE_SIGNALS = [
+    "nomina",
+    "designazione",
+    "verbale di consegna",
+    "dispositivi di protezione individuale",
+    "giudizio di idoneita",
+    "giudizio di idoneità",
+    "medico competente",
+]
+
+DATE_STRONG_LABELS = [
+    "data di conclusione del corso",
+    "conclusione del corso",
+    "data conclusione corso",
+    "data conclusione",
+    "data di svolgimento del corso",
+    "data di svolgimento",
+    "data svolgimento corso",
+    "svolgimento del corso",
+    "svolto in data",
+    "concluso il",
+    "terminato il",
+    "data fine corso",
+    "fine corso",
+]
+
+DATE_WEAK_PERIOD_LABELS = [
+    "periodo di svolgimento del corso",
+    "giorni",
+    "dal",
+    "al",
+]
+
+DATE_NEGATIVE_CONTEXTS = [
+    "nato il",
+    "nata il",
+    "data di nascita",
+    "accreditat",
+    "regione",
+    "d.d.",
+    "d.d. n",
+    "attestato emesso",
+    "data emissione",
+    "rilasciato il",
+    "n. iscrizione",
 ]
 
 
-# =========================
-# HELPERS TESTO
-# =========================
+# =========================================================
+# HELPERS BASE
+# =========================================================
 
 def normalize_spaces(text: str) -> str:
     text = text or ""
@@ -320,21 +381,6 @@ def normalize_line_for_matching(text: str) -> str:
     return text
 
 
-def upper_no_accents(text: str) -> str:
-    return strip_accents(text or "").upper()
-
-
-def is_text_sufficient(text: str) -> bool:
-    clean = normalize_text_for_matching(text)
-    if not clean:
-        return False
-    if len(clean) < 80:
-        return False
-    if len(clean.split()) < 15:
-        return False
-    return True
-
-
 def safe_filename(name: str) -> str:
     name = (name or "").strip()
     name = re.sub(r"[^\w\s\-.]", "", name, flags=re.UNICODE)
@@ -360,12 +406,32 @@ def first_non_empty(*values: str) -> str:
 
 
 def has_any_keyword(blob: str, keywords: List[str]) -> bool:
-    blob_padded = f" {blob} "
+    padded = f" {blob} "
     for kw in keywords:
-        k = normalize_text_for_matching(kw)
-        if k in blob or k in blob_padded:
+        kw_norm = normalize_text_for_matching(kw)
+        if kw_norm in blob or kw_norm in padded:
             return True
     return False
+
+
+def count_keywords(blob: str, keywords: List[str]) -> int:
+    found = 0
+    for kw in keywords:
+        kw_norm = normalize_text_for_matching(kw)
+        if kw_norm in blob:
+            found += 1
+    return found
+
+
+def is_text_sufficient(text: str) -> bool:
+    clean = normalize_text_for_matching(text)
+    if not clean:
+        return False
+    if len(clean) < 80:
+        return False
+    if len(clean.split()) < 15:
+        return False
+    return True
 
 
 def remove_noise_lines(text: str) -> str:
@@ -403,9 +469,9 @@ def remove_noise_lines(text: str) -> str:
     return normalize_spaces("\n".join(cleaned_lines))
 
 
-# =========================
+# =========================================================
 # HELPERS DATE
-# =========================
+# =========================================================
 
 def parse_date(date_str: str) -> Optional[datetime]:
     date_str = (date_str or "").strip()
@@ -448,12 +514,12 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
 
 def extract_dates(text: str) -> List[datetime]:
     raw_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", text or "")
-    parsed = []
+    out = []
     for d in raw_dates:
         dt = parse_date(d)
         if dt:
-            parsed.append(dt)
-    return parsed
+            out.append(dt)
+    return out
 
 
 def extract_birth_date(text: str) -> Optional[datetime]:
@@ -468,9 +534,9 @@ def extract_birth_date(text: str) -> Optional[datetime]:
     return None
 
 
-# =========================
-# HELPERS PERSONA
-# =========================
+# =========================================================
+# HELPERS NOME PERSONA
+# =========================================================
 
 def clean_person_line(line: str) -> str:
     raw = normalize_spaces(line)
@@ -535,6 +601,8 @@ def is_plausible_person_name_line(line: str) -> bool:
         "sorveglianza",
         "nomina",
         "designazione",
+        "verbale",
+        "dpi",
     ]
     if any(tok in line_norm for tok in forbidden):
         return False
@@ -571,29 +639,40 @@ def split_name_line(line: str) -> Tuple[str, str]:
     return nome, cognome
 
 
+def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
+    anchor_pattern = "|".join(re.escape(a) for a in NAME_ANCHORS)
+    m = re.search(
+        rf"(?:{anchor_pattern})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]{{5,120}})",
+        clean_text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return "", "", ""
+
+    raw = normalize_spaces(m.group(1))
+    raw = re.split(
+        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica)\b",
+        raw,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,.;:-")
+
+    if is_plausible_person_name_line(raw):
+        nome, cognome = split_name_line(raw)
+        if nome and cognome:
+            return nome, cognome, "anchor_regex"
+
+    return "", "", ""
+
+
 def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
     debug = []
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
-    anchors_regex = "|".join(re.escape(a) for a in NAME_ANCHORS)
-    m = re.search(
-        rf"(?:{anchors_regex})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]{{5,100}})",
-        clean_text,
-        re.IGNORECASE,
-    )
-    if m:
-        raw = normalize_spaces(m.group(1))
-        raw = re.split(
-            r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita)\b",
-            raw,
-            flags=re.IGNORECASE,
-        )[0].strip(" ,.;:-")
-        if is_plausible_person_name_line(raw):
-            nome, cognome = split_name_line(raw)
-            if nome and cognome:
-                debug.append("nome trovato con regex dopo anchor")
-                return nome, cognome, debug
+    nome, cognome, src = extract_name_after_anchor(clean_text)
+    if nome and cognome:
+        debug.append(f"nome trovato con priorità alta: {src}")
+        return nome, cognome, debug
 
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
@@ -615,30 +694,27 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
                         debug.append("nome trovato prima di riga con nato/nata")
                         return nome, cognome, debug
 
-    # fallback: prime righe plausibili
     for cand in lines[:40]:
         if is_plausible_person_name_line(cand):
             nome, cognome = split_name_line(cand)
             if nome and cognome:
-                debug.append("nome trovato per fallback su riga plausibile")
+                debug.append("nome trovato con fallback riga plausibile")
                 return nome, cognome, debug
 
     debug.append("nome non trovato")
     return "", "", debug
 
 
-# =========================
+# =========================================================
 # OCR GOOGLE VISION
-# =========================
+# =========================================================
 
 def get_vision_client():
     credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     if not credentials_path:
         raise RuntimeError("Variabile GOOGLE_APPLICATION_CREDENTIALS mancante")
-
     if not os.path.exists(credentials_path):
         raise RuntimeError(f"File credenziali non trovato: {credentials_path}")
-
     return vision.ImageAnnotatorClient()
 
 
@@ -653,7 +729,6 @@ def ocr_image_bytes(image_bytes: bytes) -> str:
     texts = response.text_annotations
     if texts:
         return normalize_spaces(texts[0].description)
-
     return ""
 
 
@@ -676,18 +751,16 @@ def pdf_to_page_images(content: bytes, dpi: int = 200) -> List[bytes]:
 def ocr_pdf_pages(content: bytes) -> Tuple[str, int]:
     page_images = pdf_to_page_images(content)
     texts = []
-
     for img_bytes in page_images:
         page_text = ocr_image_bytes(img_bytes)
         if page_text:
             texts.append(page_text)
-
     return normalize_spaces("\n\n".join(texts)), len(page_images)
 
 
-# =========================
+# =========================================================
 # ESTRAZIONE TESTO FILE
-# =========================
+# =========================================================
 
 def extract_pdf_text(content: bytes) -> str:
     text = ""
@@ -728,7 +801,7 @@ def extract_text_from_file(filename: str, content: bytes, content_type: str) -> 
     is_pdf = content_type == "application/pdf" or ext == ".pdf"
     is_image = (
         content_type.startswith("image/")
-        or ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]
+        or ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".heic"]
     )
 
     try:
@@ -772,11 +845,44 @@ def extract_text_from_file(filename: str, content: bytes, content_type: str) -> 
         return result
 
 
-# =========================
-# CLASSIFICAZIONE DOCUMENTI
-# =========================
+# =========================================================
+# ZONE TESTO
+# =========================================================
 
-def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int]]:
+def split_text_zones(text: str) -> Dict[str, str]:
+    lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
+
+    title_lines = lines[:15]
+    title_zone = "\n".join(title_lines)
+
+    anchor_idx = -1
+    for i, line in enumerate(lines[:50]):
+        line_norm = normalize_line_for_matching(line)
+        if any(anchor in line_norm for anchor in NAME_ANCHORS):
+            anchor_idx = i
+            break
+
+    if anchor_idx >= 0:
+        identity_lines = lines[max(0, anchor_idx - 2): min(len(lines), anchor_idx + 5)]
+    else:
+        identity_lines = lines[:12]
+
+    body_lines = lines[15:] if len(lines) > 15 else []
+    body_zone = "\n".join(body_lines)
+
+    return {
+        "title_zone": normalize_spaces("\n".join(title_lines)),
+        "identity_zone": normalize_spaces("\n".join(identity_lines)),
+        "body_zone": normalize_spaces(body_zone),
+        "full_text": normalize_spaces(text),
+    }
+
+
+# =========================================================
+# CLASSIFICAZIONE DOCUMENTI
+# =========================================================
+
+def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
 
     scores = {
@@ -787,131 +893,180 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int]]:
         "documenti_aziendali": 0,
     }
 
-    # -------------------------
-    # Attestati (più severo)
-    # -------------------------
-    attestato_signals = 0
-    for s in ATTESTATO_REQUIRED_SIGNALS:
-        if s in blob:
-            attestato_signals += 1
+    debug = {
+        "positive_hits": [],
+        "negative_hits": [],
+    }
 
-    if attestato_signals >= 2:
-        scores["attestati"] += attestato_signals * 2
+    # ---------------------
+    # ATTESTATI
+    # ---------------------
+    attestato_hits = count_keywords(blob, ATTESTATO_POSITIVE_SIGNALS)
+    if attestato_hits >= 2:
+        scores["attestati"] += attestato_hits * 2
+        debug["positive_hits"].append(f"attestati:+{attestato_hits * 2} segnali attestato")
+    elif attestato_hits == 1:
+        scores["attestati"] += 1
+        debug["positive_hits"].append("attestati:+1 segnale debole attestato")
 
-    # family course presence boosts only if already attestato-ish
-    if scores["attestati"] > 0:
-        if "attestato" in blob:
-            scores["attestati"] += 2
-        if "corso" in blob:
-            scores["attestati"] += 1
+    if "attestato" in blob:
+        scores["attestati"] += 2
+        debug["positive_hits"].append("attestati:+2 parola attestato")
 
-    # -------------------------
-    # Nomine
-    # -------------------------
+    if "programma del corso" in blob and ("ha frequentato" in blob or "si attesta che" in blob):
+        scores["attestati"] += 2
+        debug["positive_hits"].append("attestati:+2 programma + formulazione tipica")
+
+    # ---------------------
+    # NOMINE
+    # ---------------------
     if "nomina" in blob:
         scores["nomine"] += 6
+        debug["positive_hits"].append("nomine:+6 nomina")
     if "designazione" in blob:
         scores["nomine"] += 4
+        debug["positive_hits"].append("nomine:+4 designazione")
     if "conferimento incarico" in blob:
         scores["nomine"] += 4
-    if "incarico" in blob:
-        scores["nomine"] += 2
+        debug["positive_hits"].append("nomine:+4 conferimento incarico")
     if "lettera di nomina" in blob:
         scores["nomine"] += 4
+        debug["positive_hits"].append("nomine:+4 lettera di nomina")
 
-    # ruoli tipici di nomina
-    for role, kws in NOMINA_ROLE_KEYWORDS.items():
+    for _, kws in NOMINA_ROLE_KEYWORDS.items():
         if has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
-    # -------------------------
-    # Visite mediche
-    # -------------------------
+    # ---------------------
+    # VISITE MEDICHE
+    # ---------------------
     if "giudizio di idoneita" in blob or "giudizio di idoneità" in blob:
-        scores["visite_mediche"] += 6
+        scores["visite_mediche"] += 7
+        debug["positive_hits"].append("visite:+7 giudizio di idoneità")
     if "medico competente" in blob:
         scores["visite_mediche"] += 4
+        debug["positive_hits"].append("visite:+4 medico competente")
     if "sorveglianza sanitaria" in blob:
         scores["visite_mediche"] += 3
-    if "idoneo" in blob or "idonea" in blob:
-        scores["visite_mediche"] += 2
+        debug["positive_hits"].append("visite:+3 sorveglianza sanitaria")
     if "prescrizioni" in blob:
         scores["visite_mediche"] += 2
+        debug["positive_hits"].append("visite:+2 prescrizioni")
+    if "idoneo" in blob or "idonea" in blob:
+        scores["visite_mediche"] += 2
 
-    # -------------------------
-    # Verbali DPI
-    # -------------------------
+    # ---------------------
+    # VERBALI DPI
+    # ---------------------
     if re.search(r"\bdpi\b", blob):
         scores["verbali_dpi"] += 5
+        debug["positive_hits"].append("dpi:+5 sigla DPI")
     if "dispositivi di protezione individuale" in blob:
         scores["verbali_dpi"] += 4
+        debug["positive_hits"].append("dpi:+4 dicitura completa DPI")
     if "consegna dpi" in blob:
         scores["verbali_dpi"] += 4
-    if "firma per ricevuta" in blob:
-        scores["verbali_dpi"] += 3
+        debug["positive_hits"].append("dpi:+4 consegna dpi")
     if "verbale di consegna" in blob:
         scores["verbali_dpi"] += 3
+        debug["positive_hits"].append("dpi:+3 verbale di consegna")
+    if "firma per ricevuta" in blob:
+        scores["verbali_dpi"] += 3
 
-    # -------------------------
-    # Documenti aziendali
-    # -------------------------
+    # ---------------------
+    # DOCUMENTI AZIENDALI
+    # ---------------------
     if re.search(r"\bdvr\b", blob):
         scores["documenti_aziendali"] += 5
     if "valutazione dei rischi" in blob:
         scores["documenti_aziendali"] += 5
     if "organigramma" in blob:
         scores["documenti_aziendali"] += 3
-    if "protocollo" in blob:
-        scores["documenti_aziendali"] += 2
     if re.search(r"\bpos\b", blob):
         scores["documenti_aziendali"] += 3
     if re.search(r"\bpsc\b", blob):
         scores["documenti_aziendali"] += 3
     if "procedura" in blob:
         scores["documenti_aziendali"] += 2
+    if "protocollo" in blob:
+        scores["documenti_aziendali"] += 2
 
-    # penalizzazioni intelligenti
+    # ---------------------
+    # PENALITÀ
+    # ---------------------
+    for neg in ATTESTATO_NEGATIVE_SIGNALS:
+        if neg in blob:
+            scores["attestati"] -= 2
+            debug["negative_hits"].append(f"attestati:-2 presenza '{neg}'")
+
     if scores["nomine"] >= 6:
         scores["attestati"] -= 4
+        debug["negative_hits"].append("attestati:-4 forte match nomina")
     if scores["visite_mediche"] >= 6:
         scores["attestati"] -= 4
+        debug["negative_hits"].append("attestati:-4 forte match visita")
     if scores["verbali_dpi"] >= 5:
         scores["attestati"] -= 3
+        debug["negative_hits"].append("attestati:-3 forte match DPI")
     if scores["documenti_aziendali"] >= 5:
         scores["attestati"] -= 3
+        debug["negative_hits"].append("attestati:-3 forte match documento aziendale")
 
-    best_category = max(scores, key=scores.get)
-    best_score = scores[best_category]
+    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    best_category, best_score = ordered[0]
+    second_category, second_score = ordered[1]
+    delta = best_score - second_score
+
+    meta = {
+        "best_category": best_category,
+        "best_score": best_score,
+        "second_category": second_category,
+        "second_score": second_score,
+        "delta": delta,
+        "classification_debug": debug,
+    }
 
     if best_score < 4:
-        return "altri_da_verificare", scores
+        return "altri_da_verificare", scores, meta
 
-    return best_category, scores
+    if delta <= 1:
+        meta["classification_warning"] = "classificazione_ambigua"
+        return "altri_da_verificare", scores, meta
 
-
-# =========================
-# PARSER ATTESTATI
-# =========================
-
-def extract_title_block(text: str) -> str:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    title_lines = []
-    for line in lines[:20]:
-        if len(line) > 3:
-            title_lines.append(line)
-        if len(title_lines) >= 8:
-            break
-    return normalize_text_for_matching(" ".join(title_lines))
+    return best_category, scores, meta
 
 
-def detect_course_family(text: str, filename: str) -> Tuple[str, str, List[str]]:
-    blob = normalize_text_for_matching(f"{filename}\n{text}")
-    title_blob = extract_title_block(text)
+# =========================================================
+# DETECTION CORSO ATTESTATI
+# =========================================================
+
+def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[str, str, Dict[str, int], List[str]]:
+    title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
+    identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
+    body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
+    full_blob = normalize_text_for_matching(zones.get("full_text", ""))
+
     debug = []
+    scores: Dict[str, int] = {
+        "FORMAZIONE_GENERALE": 0,
+        "FORMAZIONE_SPECIFICA": 0,
+        "AGGIORNAMENTO_FORMAZIONE_LAVORATORI": 0,
+        "PRIMO_SOCCORSO": 0,
+        "ANTINCENDIO": 0,
+        "PREPOSTO": 0,
+        "RLS": 0,
+        "RSPP_DL": 0,
+        "HACCP": 0,
+        "PONTEGGI": 0,
+        "CARRELLISTA": 0,
+        "PLE": 0,
+        "LAVORI_IN_QUOTA": 0,
+        "CORSO_NON_RICONOSCIUTO": 0,
+    }
 
-    is_update = any(w in blob for w in UPDATE_WORDS)
+    is_update = any(w in full_blob for w in UPDATE_WORDS)
 
-    # corsi specifici: priorità assoluta
+    # CORSI SPECIFICI - peso forte sul titolo, più debole nel body
     for family in [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
@@ -924,175 +1079,182 @@ def detect_course_family(text: str, filename: str) -> Tuple[str, str, List[str]]
         "LAVORI_IN_QUOTA",
         "HACCP",
     ]:
-        if has_any_keyword(blob, SPECIFIC_COURSE_KEYWORDS[family]) or has_any_keyword(title_blob, SPECIFIC_COURSE_KEYWORDS[family]):
-            debug.append(f"match corso specifico: {family}")
-            return family, "aggiornamento" if is_update else "base", debug
+        kws = SPECIFIC_COURSE_KEYWORDS[family]
+        title_hits = count_keywords(title_blob, kws)
+        identity_hits = count_keywords(identity_blob, kws)
+        body_hits = count_keywords(body_blob, kws)
 
-    # aggiornamento formazione lavoratori generico
-    if has_any_keyword(blob, GENERIC_WORKER_TRAINING_PATTERNS):
-        debug.append("match corso: AGGIORNAMENTO_FORMAZIONE_LAVORATORI")
-        return "AGGIORNAMENTO_FORMAZIONE_LAVORATORI", "aggiornamento", debug
+        scores[family] += title_hits * 6
+        scores[family] += identity_hits * 3
+        scores[family] += body_hits * 1
 
-    if has_any_keyword(blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"]) or has_any_keyword(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"]):
-        debug.append("match corso: FORMAZIONE_SPECIFICA")
-        return "FORMAZIONE_SPECIFICA", "aggiornamento" if is_update else "base", debug
+        if title_hits:
+            debug.append(f"{family}: +{title_hits * 6} match titolo")
+        if identity_hits:
+            debug.append(f"{family}: +{identity_hits * 3} match zona nominativo")
+        if body_hits:
+            debug.append(f"{family}: +{body_hits} match corpo")
 
-    if has_any_keyword(blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"]):
-        debug.append("match corso: FORMAZIONE_GENERALE")
-        return "FORMAZIONE_GENERALE", "aggiornamento" if is_update else "base", debug
+    # GENERICI LAVORATORI
+    fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
+    fg_body = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
+    fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
+    fs_body = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
+    fl_title = count_keywords(title_blob, GENERIC_WORKER_TRAINING_PATTERNS)
+    fl_body = count_keywords(full_blob, GENERIC_WORKER_TRAINING_PATTERNS)
 
-    debug.append("corso non riconosciuto")
-    return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", debug
+    scores["FORMAZIONE_GENERALE"] += fg_title * 6 + fg_body * 1
+    scores["FORMAZIONE_SPECIFICA"] += fs_title * 6 + fs_body * 1
+    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 7 + fl_body * 2
+
+    if fg_title:
+        debug.append(f"FORMAZIONE_GENERALE: +{fg_title * 6} match titolo")
+    if fs_title:
+        debug.append(f"FORMAZIONE_SPECIFICA: +{fs_title * 6} match titolo")
+    if fl_title:
+        debug.append(f"AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +{fl_title * 7} match titolo")
+
+    # Rafforzamenti ragionati
+    if "formazione generale" in title_blob:
+        scores["FORMAZIONE_GENERALE"] += 4
+        debug.append("FORMAZIONE_GENERALE: +4 boost titolo esplicito")
+    if "formazione specifica" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 4
+        debug.append("FORMAZIONE_SPECIFICA: +4 boost titolo esplicito")
+    if "aggiornamento" in title_blob and ("formazione lavoratori" in title_blob or "formazione dei lavoratori" in title_blob):
+        scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += 5
+        debug.append("AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +5 boost aggiornamento titolo")
+
+    # Penalità anti-falsi-positivi: keyword nel programma non deve battere un titolo chiaro
+    if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= 8:
+        for family in ["PRIMO_SOCCORSO", "ANTINCENDIO", "PREPOSTO"]:
+            if scores[family] > 0 and count_keywords(title_blob, SPECIFIC_COURSE_KEYWORDS[family]) == 0:
+                scores[family] -= 3
+                debug.append(f"{family}: -3 penalità perché match solo nel corpo contro titolo lavoratori")
+
+    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    best_family, best_score = ordered[0]
+    second_family, second_score = ordered[1]
+
+    if best_score <= 0 or (best_score - second_score) <= 1:
+        debug.append("famiglia corso incerta")
+        return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", scores, debug
+
+    debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
+    return best_family, "aggiornamento" if is_update else "base", scores, debug
 
 
-def find_date_near_labels(lines: List[str], labels: List[str]) -> Optional[datetime]:
-    for i, line in enumerate(lines):
-        line_norm = normalize_line_for_matching(line)
-        if any(lbl in line_norm for lbl in labels):
-            same_line_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", line)
-            for d in same_line_dates:
-                dt = parse_date(d)
-                if dt:
-                    return dt
+# =========================================================
+# ESTRAZIONE DATE PESATE
+# =========================================================
 
-            for j in range(i + 1, min(i + 3, len(lines))):
-                near_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", lines[j])
-                for d in near_dates:
-                    dt = parse_date(d)
-                    if dt:
-                        return dt
-    return None
-
-
-def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], str]:
-    debug = []
-    source = "none"
+def build_date_candidates(text: str) -> List[Dict[str, Any]]:
     lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
+    candidates: List[Dict[str, Any]] = []
 
-    label_groups = [
-        [
-            "data di conclusione del corso",
-            "conclusione del corso",
-            "data conclusione corso",
-            "data conclusione",
-        ],
-        [
-            "data di svolgimento del corso",
-            "data di svolgimento",
-            "data svolgimento corso",
-            "svolgimento del corso",
-            "svolto in data",
-        ],
-        [
-            "data fine corso",
-            "fine corso",
-            "terminato il",
-            "concluso il",
-        ],
-    ]
+    for i, line in enumerate(lines):
+        found = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", line)
+        if not found:
+            continue
 
-    for labels in label_groups:
-        dt = find_date_near_labels(lines, labels)
-        if dt:
-            debug.append(f"data conclusione trovata vicino a label: {labels[0]}")
-            source = "strong_label"
-            return dt, debug, source
+        context_window = " ".join(lines[max(0, i - 1): min(len(lines), i + 2)])
+        context_norm = normalize_text_for_matching(context_window)
 
-    patterns = [
-        r"data di conclusione del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"conclusione del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"data conclusione corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"data di svolgimento del corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"data di svolgimento\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"svolto in data\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        r"data fine corso\s*:?\s*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-    ]
-    for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            dt = parse_date(m.group(1))
-            if dt:
-                debug.append("data conclusione trovata con regex diretta")
-                source = "regex_label"
-                return dt, debug, source
+        for raw_date in found:
+            dt = parse_date(raw_date)
+            if not dt:
+                continue
 
-    # pattern: giorni multipli
-    m = re.search(
-        r"giorni\s*:\s*(.+?)(svoltosi|svolto|foligno|perugia|$)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        dates = extract_dates(m.group(1))
-        if dates:
-            debug.append("data conclusione ricavata da blocco giorni")
-            source = "period_block"
-            return max(dates), debug, source
+            score = 0
+            reasons = []
 
-    m = re.search(
-        r"(periodo di svolgimento del corso|svolgimento del corso|periodo corso|dal|durata del corso)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        block = m.group(2)
-        dates = extract_dates(block)
-        if dates:
-            debug.append("data conclusione ricavata da blocco periodo corso")
-            source = "period_block"
-            return max(dates), debug, source
+            # positive
+            if any(lbl in context_norm for lbl in DATE_STRONG_LABELS):
+                score += 8
+                reasons.append("strong_label")
+            if any(lbl in context_norm for lbl in DATE_WEAK_PERIOD_LABELS):
+                score += 4
+                reasons.append("period_label")
 
-    m = re.search(
-        r"dal\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}).{0,100}?al\s+(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
-        text,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        dt = parse_date(m.group(2))
-        if dt:
-            debug.append("data conclusione ricavata da pattern dal/al")
-            source = "period_block"
-            return dt, debug, source
+            # negative
+            if any(neg in context_norm for neg in DATE_NEGATIVE_CONTEXTS):
+                score -= 7
+                reasons.append("negative_context")
 
-    all_dates = extract_dates(text)
-    if not all_dates:
+            # plausibility
+            if 1990 <= dt.year <= datetime.now().year + 1:
+                score += 1
+                reasons.append("year_plausible")
+            else:
+                score -= 5
+                reasons.append("year_implausible")
+
+            candidates.append({
+                "raw": raw_date,
+                "date": dt,
+                "line_index": i,
+                "line": line[:200],
+                "context": context_window[:300],
+                "score": score,
+                "reasons": reasons,
+            })
+
+    return candidates
+
+
+def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], str, List[Dict[str, Any]]]:
+    debug = []
+    candidates = build_date_candidates(text)
+
+    if not candidates:
         debug.append("nessuna data trovata")
-        return None, debug, source
+        return None, debug, "none", []
 
     birth_date = extract_birth_date(text)
+    filtered = []
 
-    emission_match = re.search(
-        r"(data emissione|attestato emesso il|rilasciato il)\s*:?[\s]*(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+    for c in candidates:
+        dt = c["date"]
+        if birth_date and dt.date() == birth_date.date():
+            c["score"] -= 8
+            c["reasons"].append("birth_date_penalty")
+        filtered.append(c)
+
+    # Caso speciale: se c'è un blocco periodo corso / giorni, prendiamo l'ultima del blocco
+    period_block_match = re.search(
+        r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
-        re.IGNORECASE,
+        re.IGNORECASE | re.DOTALL,
     )
-    emission_date = parse_date(emission_match.group(2)) if emission_match else None
+    if period_block_match:
+        block = period_block_match.group(0)
+        period_dates = extract_dates(block)
+        if period_dates:
+            dt = max(period_dates)
+            debug.append("data conclusione scelta come ultima data di blocco periodo")
+            return dt, debug, "period_block", filtered
 
-    excluded_context_patterns = [
-        r"accreditat",
-        r"d\.?d\.?\s*n",
-        r"regione",
-        r"del\s+\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}",
-    ]
+    ordered = sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
+    best = ordered[0]
 
-    valid = []
-    for d in all_dates:
-        if birth_date and d.date() == birth_date.date():
-            continue
-        if emission_date and d.date() == emission_date.date():
-            continue
-        if d.year < 1990 or d.year > datetime.now().year + 1:
-            continue
-        valid.append(d)
+    if best["score"] >= 8:
+        debug.append(f"data conclusione scelta con score forte: {best['raw']}")
+        return best["date"], debug, "strong_score", ordered
 
-    if valid:
-        debug.append("data conclusione scelta come ultima data plausibile filtrata")
-        source = "weak_fallback"
-        return max(valid), debug, source
+    # fallback su date plausibili positive
+    positive = [c for c in ordered if c["score"] >= 1]
+    if positive:
+        best = positive[0]
+        debug.append(f"data conclusione scelta con fallback positivo: {best['raw']}")
+        return best["date"], debug, "weak_positive", ordered
 
     debug.append("nessuna data conclusione affidabile")
-    return None, debug, source
+    return None, debug, "none", ordered
 
+
+# =========================================================
+# HELPERS SCADENZA / FILENAME
+# =========================================================
 
 def compute_scadenza(course_family: str, conclusion_date: Optional[datetime]) -> Tuple[str, str]:
     if not conclusion_date:
@@ -1116,12 +1278,38 @@ def build_attestato_filename(cognome: str, nome: str, course_family: str, origin
     return safe_filename(base_name) + ".pdf"
 
 
+def build_nomina_filename(cognome: str, nome: str, ruolo: str, original_filename: str) -> str:
+    base_name = f"{cognome}_{nome}_NOMINA_{ruolo}".strip("_")
+    if base_name in {"", "NOMINA"}:
+        base_name = os.path.splitext(original_filename)[0]
+    return safe_filename(base_name) + ".pdf"
+
+
+def build_dpi_filename(cognome: str, nome: str, original_filename: str) -> str:
+    base_name = f"{cognome}_{nome}_VERBALE_DPI".strip("_")
+    if base_name in {"", "VERBALE_DPI"}:
+        base_name = os.path.splitext(original_filename)[0]
+    return safe_filename(base_name) + ".pdf"
+
+
+def build_visita_filename(cognome: str, nome: str, original_filename: str) -> str:
+    base_name = f"{cognome}_{nome}_VISITA_MEDICA".strip("_")
+    if base_name in {"", "VISITA_MEDICA"}:
+        base_name = os.path.splitext(original_filename)[0]
+    return safe_filename(base_name) + ".pdf"
+
+
+# =========================================================
+# PARSER ATTESTATI
+# =========================================================
+
 def compute_attestato_confidenza(
     nome: str,
     cognome: str,
     course_family: str,
     conclusion_date: Optional[datetime],
     date_source: str,
+    course_scores: Dict[str, int],
 ) -> str:
     points = 0
 
@@ -1132,14 +1320,16 @@ def compute_attestato_confidenza(
     if conclusion_date:
         points += 2
 
-    if date_source == "strong_label":
+    if date_source == "strong_score":
         points += 2
-    elif date_source == "regex_label":
-        points += 1
     elif date_source == "period_block":
+        points += 2
+    elif date_source == "weak_positive":
         points += 0
-    elif date_source == "weak_fallback":
-        points -= 1
+
+    ordered = sorted(course_scores.items(), key=lambda x: x[1], reverse=True)
+    if len(ordered) >= 2 and (ordered[0][1] - ordered[1][1]) >= 3:
+        points += 1
 
     if points >= 8:
         return "alta"
@@ -1159,13 +1349,10 @@ def compute_review_flag_attestato(
 
     if not nome or not cognome:
         reasons.append("nome_o_cognome_non_estratti")
-
     if course_family == "CORSO_NON_RICONOSCIUTO":
         reasons.append("corso_non_riconosciuto")
-
     if not conclusion_date:
         reasons.append("data_conclusione_non_trovata")
-
     if confidenza == "bassa":
         reasons.append("confidenza_bassa")
 
@@ -1174,40 +1361,52 @@ def compute_review_flag_attestato(
 
 def parse_attestato(text: str, filename: str) -> Dict[str, Any]:
     debug_notes = []
+    zones = split_text_zones(text)
 
     nome, cognome, name_debug = extract_name_generic(text)
     debug_notes.extend(name_debug)
 
-    course_family, tipo_percorso, course_debug = detect_course_family(text, filename)
+    family, tipo_percorso, course_scores, course_debug = score_course_family_by_zone(zones, filename)
     debug_notes.extend(course_debug)
 
-    conclusion_date, date_debug, date_source = extract_conclusion_date(text)
+    conclusion_date, date_debug, date_source, date_candidates = extract_conclusion_date(text)
     debug_notes.extend(date_debug)
 
-    scad_label, scad_value = compute_scadenza(course_family, conclusion_date)
-    confidenza = compute_attestato_confidenza(nome, cognome, course_family, conclusion_date, date_source)
+    scad_label, scad_value = compute_scadenza(family, conclusion_date)
+    confidenza = compute_attestato_confidenza(nome, cognome, family, conclusion_date, date_source, course_scores)
 
     suggested_name = build_attestato_filename(
         cognome.upper() if cognome else "",
         nome.upper() if nome else "",
-        course_family,
+        family,
         filename,
     )
 
     needs_review, review_reasons = compute_review_flag_attestato(
         nome=nome,
         cognome=cognome,
-        course_family=course_family,
+        course_family=family,
         conclusion_date=conclusion_date,
         confidenza=confidenza,
     )
+
+    top_dates = []
+    for cand in date_candidates[:5]:
+        top_dates.append({
+            "raw": cand["raw"],
+            "score": cand["score"],
+            "reasons": cand["reasons"],
+            "line": cand["line"],
+        })
+
+    ordered_course_scores = sorted(course_scores.items(), key=lambda x: x[1], reverse=True)[:5]
 
     return {
         "categoria": "Attestato",
         "nome": nome,
         "cognome": cognome,
-        "corso": course_family,
-        "famiglia_corso": course_family,
+        "corso": family,
+        "famiglia_corso": family,
         "tipo_percorso": tipo_percorso,
         "data_conclusione": format_date(conclusion_date),
         "data_scadenza": scad_value if scad_label == "data_scadenza" else "",
@@ -1218,12 +1417,15 @@ def parse_attestato(text: str, filename: str) -> Dict[str, Any]:
         "needs_review": needs_review,
         "review_reasons": review_reasons,
         "parser_debug": unique_preserve_order(debug_notes),
+        "course_score_details": dict(ordered_course_scores),
+        "date_candidates_top": top_dates,
+        "date_source": date_source,
     }
 
 
-# =========================
+# =========================================================
 # PARSER NOMINE
-# =========================
+# =========================================================
 
 def detect_nomina_role(text: str) -> str:
     blob = normalize_text_for_matching(text)
@@ -1234,33 +1436,18 @@ def detect_nomina_role(text: str) -> str:
 
 
 def extract_document_date(text: str) -> Tuple[Optional[datetime], str]:
-    lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
-    labels = [
-        "data",
-        "in data",
-        "li",
-        "il giorno",
-    ]
-    dt = find_date_near_labels(lines, labels)
-    if dt:
-        return dt, "label"
-
-    all_dates = extract_dates(text)
-    if all_dates:
-        return max(all_dates), "fallback"
-
+    candidates = build_date_candidates(text)
+    ordered = sorted(candidates, key=lambda x: (x["score"], x["date"]), reverse=True)
+    if ordered:
+        best = ordered[0]
+        if best["score"] >= 1:
+            return best["date"], "scored"
     return None, "none"
-
-
-def build_nomina_filename(cognome: str, nome: str, ruolo: str, original_filename: str) -> str:
-    base_name = f"{cognome}_{nome}_NOMINA_{ruolo}".strip("_")
-    if base_name in {"", "NOMINA"}:
-        base_name = os.path.splitext(original_filename)[0]
-    return safe_filename(base_name) + ".pdf"
 
 
 def parse_nomina(text: str, filename: str) -> Dict[str, Any]:
     debug = []
+
     nome, cognome, name_debug = extract_name_generic(text)
     debug.extend(name_debug)
 
@@ -1315,31 +1502,25 @@ def parse_nomina(text: str, filename: str) -> Dict[str, Any]:
     }
 
 
-# =========================
+# =========================================================
 # PARSER VERBALI DPI
-# =========================
+# =========================================================
 
 def extract_dpi_reference(text: str) -> str:
-    blob = normalize_spaces(text)
-    lines = [l.strip() for l in blob.splitlines() if l.strip()]
+    lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
     candidates = []
     for line in lines:
-        if "dpi" in normalize_line_for_matching(line) or "dispositivi di protezione individuale" in normalize_line_for_matching(line):
+        norm = normalize_line_for_matching(line)
+        if "dpi" in norm or "dispositivi di protezione individuale" in norm:
             candidates.append(line)
     if candidates:
         return candidates[0][:120]
     return ""
 
 
-def build_dpi_filename(cognome: str, nome: str, original_filename: str) -> str:
-    base_name = f"{cognome}_{nome}_VERBALE_DPI".strip("_")
-    if base_name in {"", "VERBALE_DPI"}:
-        base_name = os.path.splitext(original_filename)[0]
-    return safe_filename(base_name) + ".pdf"
-
-
 def parse_verbale_dpi(text: str, filename: str) -> Dict[str, Any]:
     debug = []
+
     nome, cognome, name_debug = extract_name_generic(text)
     debug.extend(name_debug)
 
@@ -1390,13 +1571,12 @@ def parse_verbale_dpi(text: str, filename: str) -> Dict[str, Any]:
     }
 
 
-# =========================
+# =========================================================
 # PARSER VISITE MEDICHE
-# =========================
+# =========================================================
 
 def extract_visit_esito(text: str) -> str:
     blob = normalize_text_for_matching(text)
-    # ordine importante: match più specifici prima
     ordered = sorted(VISITA_ESITI, key=lambda x: len(x), reverse=True)
     for e in ordered:
         if normalize_text_for_matching(e) in blob:
@@ -1404,15 +1584,9 @@ def extract_visit_esito(text: str) -> str:
     return ""
 
 
-def build_visita_filename(cognome: str, nome: str, original_filename: str) -> str:
-    base_name = f"{cognome}_{nome}_VISITA_MEDICA".strip("_")
-    if base_name in {"", "VISITA_MEDICA"}:
-        base_name = os.path.splitext(original_filename)[0]
-    return safe_filename(base_name) + ".pdf"
-
-
 def parse_visita_medica(text: str, filename: str) -> Dict[str, Any]:
     debug = []
+
     nome, cognome, name_debug = extract_name_generic(text)
     debug.extend(name_debug)
 
@@ -1463,14 +1637,16 @@ def parse_visita_medica(text: str, filename: str) -> Dict[str, Any]:
     }
 
 
-# =========================
-# PARSER DOCUMENTO GENERICO
-# =========================
+# =========================================================
+# PARSER GENERICO
+# =========================================================
 
 def parse_documento_generico(text: str, filename: str, categoria_label: str) -> Dict[str, Any]:
     confidenza = "media" if categoria_label != "Da verificare" else "bassa"
     needs_review = categoria_label == "Da verificare"
     review_reasons = ["classificazione_incerta"] if needs_review else []
+
+    ext = os.path.splitext(filename)[1] or ".pdf"
 
     return {
         "categoria": categoria_label,
@@ -1486,19 +1662,19 @@ def parse_documento_generico(text: str, filename: str, categoria_label: str) -> 
         "confidenza": confidenza,
         "needs_review": needs_review,
         "review_reasons": review_reasons,
-        "suggested_filename": safe_filename(os.path.splitext(filename)[0]) + os.path.splitext(filename)[1],
+        "suggested_filename": safe_filename(os.path.splitext(filename)[0]) + ext,
         "parser_debug": ["parser generico"],
     }
 
 
-# =========================
+# =========================================================
 # ANALISI DOCUMENTO
-# =========================
+# =========================================================
 
 def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[str, Any]:
     extraction = extract_text_from_file(filename, content, content_type)
     text = extraction["text"]
-    category, scores = score_category(text, filename)
+    category, scores, category_meta = score_category(text, filename)
 
     result = {
         "filename": filename,
@@ -1506,6 +1682,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         "size_bytes": len(content),
         "testo_estratto": text[:3000],
         "categoria": category,
+        "categoria_label": CATEGORY_LABELS.get(category, "Da verificare"),
         "cartella": FOLDERS.get(category, "altri_da_verificare"),
         "nome": "",
         "cognome": "",
@@ -1520,6 +1697,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         "needs_review": False,
         "review_reasons": [],
         "score_details": scores,
+        "score_meta": category_meta,
         "suggested_filename": safe_filename(filename),
         "extraction_method": extraction["extraction_method"],
         "ocr_used": extraction["ocr_used"],
@@ -1532,6 +1710,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
 
     if extraction["extraction_method"] == "extraction_failed":
         result["categoria"] = "altri_da_verificare"
+        result["categoria_label"] = "Da verificare"
         result["cartella"] = FOLDERS["altri_da_verificare"]
         result["needs_review"] = True
         result["review_reasons"] = ["estrazione_testo_fallita"]
@@ -1539,7 +1718,6 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         result["parser_debug"] = ["estrazione testo fallita"]
         return result
 
-    # dispatcher parser
     if category == "attestati":
         parsed = parse_attestato(text, filename)
         result.update(parsed)
@@ -1559,21 +1737,43 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         parsed = parse_documento_generico(text, filename, "Da verificare")
         result.update(parsed)
 
-    # cartella finale coerente con categoria
     result["cartella"] = FOLDERS.get(category, "altri_da_verificare")
+
+    # ulteriore sicurezza: classifica ambigua => review
+    if category_meta.get("delta", 99) <= 1:
+        result["needs_review"] = True
+        if "classificazione_ambigua" not in result["review_reasons"]:
+            result["review_reasons"].append("classificazione_ambigua")
 
     return result
 
 
-# =========================
+# =========================================================
 # ZIP + REPORT
-# =========================
+# =========================================================
 
 def build_report_attestati(items: List[Dict[str, Any]]) -> str:
     lines = []
     lines.append("REPORT ATTESTATI")
-    lines.append("=" * 120)
+    lines.append("=" * 140)
     lines.append("")
+
+    header = " | ".join([
+        "FILE",
+        "COGNOME",
+        "NOME",
+        "CORSO",
+        "TIPO_PERCORSO",
+        "DATA_CONCLUSIONE",
+        "LABEL_SCADENZA",
+        "VALORE_SCADENZA",
+        "CONFIDENZA",
+        "NEEDS_REVIEW",
+        "REVIEW_REASONS",
+        "EXTRACTION_METHOD",
+    ])
+    lines.append(header)
+    lines.append("-" * 140)
 
     for item in items:
         label = item.get("scadenza_label", "data_scadenza")
@@ -1630,13 +1830,31 @@ def build_zip(files_data: List[Tuple[UploadFile, bytes]], analyzed: List[Dict[st
     return zip_buffer
 
 
-# =========================
+# =========================================================
+# HELPERS ENDPOINT
+# =========================================================
+
+async def analyze_upload(file: UploadFile) -> Dict[str, Any]:
+    content = await file.read()
+    return analyze_document(file.filename, content, file.content_type or "")
+
+
+# =========================================================
 # ENDPOINTS
-# =========================
+# =========================================================
 
 @app.api_route("/", methods=["GET", "HEAD"])
 def home():
-    return {"status": "ok", "message": "Docu OCR Engine online"}
+    return {
+        "status": "ok",
+        "message": "Docu OCR Engine online",
+        "version": "4.0.0"
+    }
+
+
+@app.get("/health")
+def health():
+    return JSONResponse({"status": "healthy"})
 
 
 @app.get("/upload", response_class=HTMLResponse)
@@ -1647,16 +1865,26 @@ def upload_page():
         <title>Upload Documenti</title>
       </head>
       <body style="font-family:Arial;padding:40px;">
-        <h2>Carica documento singolo</h2>
+        <h2>Analizza documento singolo</h2>
         <form action="/analyze" enctype="multipart/form-data" method="post">
           <input name="file" type="file" />
           <button type="submit">Analizza</button>
         </form>
+
         <hr>
-        <h2>Carica più file</h2>
+
+        <h2>Analizza più file (JSON, nessun ZIP automatico)</h2>
+        <form action="/analyze-batch" enctype="multipart/form-data" method="post">
+          <input name="files" type="file" multiple />
+          <button type="submit">Analizza batch</button>
+        </form>
+
+        <hr>
+
+        <h2>Organizza archivio ZIP</h2>
         <form action="/organize-zip" enctype="multipart/form-data" method="post">
           <input name="files" type="file" multiple />
-          <button type="submit">Organizza ZIP</button>
+          <button type="submit">Scarica ZIP</button>
         </form>
       </body>
     </html>
@@ -1666,8 +1894,7 @@ def upload_page():
 @app.post("/analyze")
 async def analyze(file: Annotated[UploadFile, File(...)]):
     try:
-        content = await file.read()
-        item = analyze_document(file.filename, content, file.content_type or "")
+        item = await analyze_upload(file)
         return {"results": [item]}
     except Exception as e:
         return JSONResponse(
@@ -1676,9 +1903,10 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
                 "results": [{
                     "filename": file.filename if file else "",
                     "content_type": file.content_type if file else "",
-                    "size_bytes": len(content) if "content" in locals() else 0,
+                    "size_bytes": 0,
                     "testo_estratto": "",
                     "categoria": "altri_da_verificare",
+                    "categoria_label": "Da verificare",
                     "cartella": "altri_da_verificare",
                     "nome": "",
                     "cognome": "",
@@ -1693,6 +1921,7 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
                     "needs_review": True,
                     "review_reasons": ["errore_interno_backend"],
                     "score_details": {},
+                    "score_meta": {},
                     "suggested_filename": safe_filename(file.filename) if file else "",
                     "extraction_method": "fatal_error",
                     "ocr_used": False,
@@ -1706,8 +1935,57 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
         )
 
 
+@app.post("/analyze-batch")
+async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
+    if not files:
+        raise HTTPException(status_code=400, detail="Nessun file caricato")
+
+    results = []
+    for file in files:
+        try:
+            item = await analyze_upload(file)
+            results.append(item)
+        except Exception as e:
+            results.append({
+                "filename": file.filename if file else "",
+                "content_type": file.content_type if file else "",
+                "size_bytes": 0,
+                "testo_estratto": "",
+                "categoria": "altri_da_verificare",
+                "categoria_label": "Da verificare",
+                "cartella": "altri_da_verificare",
+                "nome": "",
+                "cognome": "",
+                "corso": "",
+                "famiglia_corso": "",
+                "tipo_percorso": "",
+                "data_conclusione": "",
+                "data_scadenza": "",
+                "prossimo_aggiornamento": "",
+                "scadenza_label": "",
+                "confidenza": "bassa",
+                "needs_review": True,
+                "review_reasons": ["errore_interno_backend"],
+                "score_details": {},
+                "score_meta": {},
+                "suggested_filename": safe_filename(file.filename) if file else "",
+                "extraction_method": "fatal_error",
+                "ocr_used": False,
+                "ocr_pages": 0,
+                "ocr_soft_limit": OCR_SOFT_LIMIT,
+                "ocr_alert": False,
+                "extraction_error": str(e),
+                "parser_debug": ["eccezione gestita in endpoint /analyze-batch"],
+            })
+
+    return {
+        "results": results,
+        "count": len(results),
+    }
+
+
 @app.post("/organize-zip")
-async def organize_zip(files: Annotated[list[UploadFile], File(...)]):
+async def organize_zip(files: Annotated[List[UploadFile], File(...)]):
     if not files:
         raise HTTPException(status_code=400, detail="Nessun file caricato")
 
@@ -1726,8 +2004,3 @@ async def organize_zip(files: Annotated[list[UploadFile], File(...)]):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="archivio_documenti.zip"'},
     )
-
-
-@app.get("/health")
-def health():
-    return JSONResponse({"status": "healthy"})
