@@ -29,7 +29,7 @@ if creds_json:
 # APP
 # =========================================================
 
-app = FastAPI(title="Docu OCR Engine", version="5.1.0")
+app = FastAPI(title="Docu OCR Engine", version="5.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,9 +79,7 @@ CATEGORY_LABEL_TO_KEY = {
 }
 
 COURSE_RULES = {
-    "FORMAZIONE_GENERALE": {"years": None, "label": "nessuna_scadenza"},
-    "FORMAZIONE_SPECIFICA": {"years": 5, "label": "data_scadenza"},
-    "AGGIORNAMENTO_FORMAZIONE_LAVORATORI": {"years": 5, "label": "data_scadenza"},
+    "FORMAZIONE_LAVORATORI": {"years": 5, "label": "data_scadenza"},
     "PRIMO_SOCCORSO": {"years": 3, "label": "data_scadenza"},
     "PREPOSTO": {"years": 2, "label": "data_scadenza"},
     "PONTEGGI": {"years": 4, "label": "data_scadenza"},
@@ -157,7 +155,7 @@ INVALID_NAME_TOKENS = {
     "nato", "nata", "nato/a", "nata/a",
     "attestato", "corso", "data", "luogo", "n", "nr",
     "conferito", "rilasciato", "certifica", "attesta",
-    "ai", "sensi", "della", "del", "dei"
+    "ai", "sensi", "della", "del", "dei", "qualifica", "operaio"
 }
 
 UPDATE_WORDS = [
@@ -621,6 +619,9 @@ def is_plausible_person_name_line(line: str) -> bool:
         "designazione",
         "verbale",
         "dpi",
+        "qualifica",
+        "settore di riferimento",
+        "codice ateco",
     ]
     if any(tok in line_norm for tok in forbidden):
         return False
@@ -681,25 +682,23 @@ def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
 
     return "", "", ""
 
+
 def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
     debug = []
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
-    # 1. priorità assoluta: regex dopo anchor
     nome, cognome, src = extract_name_after_anchor(clean_text)
     if nome and cognome:
         debug.append(f"nome trovato con priorità alta: {src}")
         return nome, cognome, debug
 
-    # 2. riga immediatamente dopo anchor
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
         if any(anchor in line_norm for anchor in NAME_ANCHORS):
             for cand in lines[i + 1:i + 4]:
                 cand_norm = normalize_line_for_matching(cand)
 
-                # blocco righe palesemente non nominativi
                 if cand_norm.startswith("qualifica"):
                     continue
                 if cand_norm.startswith("settore di riferimento"):
@@ -717,7 +716,6 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
                         debug.append("nome trovato nelle righe successive ad anchor")
                         return nome, cognome, debug
 
-    # 3. fallback prima di nato/nata
     for i, line in enumerate(lines):
         if re.search(r"\bnato\b|\bnata\b|\bnato\/a\b", line, re.IGNORECASE):
             prev_candidates = list(reversed(lines[max(0, i - 3):i]))
@@ -731,7 +729,6 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
                         debug.append("nome trovato prima di riga con nato/nata")
                         return nome, cognome, debug
 
-    # 4. fallback generico molto più rigido
     for cand in lines[:25]:
         cand_norm = normalize_line_for_matching(cand)
         if cand_norm.startswith("qualifica"):
@@ -928,7 +925,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     zones = split_text_zones(text)
 
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
-    body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
 
     scores = {
         "attestati": 0,
@@ -1123,6 +1119,7 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 # =========================================================
 # DETECTION CORSO ATTESTATI
 # =========================================================
+
 def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[str, str, str, Dict[str, int], List[str]]:
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
     identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
@@ -1146,14 +1143,10 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "LAVORI_IN_QUOTA": 0,
         "CORSO_NON_RICONOSCIUTO": 0,
     }
-    # FIX: RLS è sempre aggiornamento se non specificato diversamente
-if best_family == "RLS":
-    tipo = "aggiornamento"
-    debug.append("RLS forzato come aggiornamento")
-    return "RLS", tipo, "", scores, debug
 
-    # aggiornamento vero solo se c'è scritto aggiornamento nel titolo/testa
-    is_update = "aggiornamento" in title_blob or "agg.to" in title_blob
+    is_update = any(w in title_blob for w in UPDATE_WORDS) or (
+        "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
+    )
 
     for family in [
         "PRIMO_SOCCORSO",
@@ -1219,15 +1212,22 @@ if best_family == "RLS":
         scores["FORMAZIONE_SPECIFICA"] += 2
         debug.append("FORMAZIONE_SPECIFICA: +2 rischio basso nel titolo")
 
+    if "rischio alto" in full_blob and "formazione specifica" in full_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 2
+        debug.append("FORMAZIONE_SPECIFICA: +2 rischio alto nel testo")
+    if "rischio medio" in full_blob and "formazione specifica" in full_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 1
+        debug.append("FORMAZIONE_SPECIFICA: +1 rischio medio nel testo")
+    if "rischio basso" in full_blob and "formazione specifica" in full_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 1
+        debug.append("FORMAZIONE_SPECIFICA: +1 rischio basso nel testo")
+
     if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= 8:
         for family in ["PRIMO_SOCCORSO", "ANTINCENDIO", "PREPOSTO"]:
             if scores[family] > 0 and count_keywords(title_blob, SPECIFIC_COURSE_KEYWORDS[family]) == 0:
                 scores[family] -= 3
                 debug.append(f"{family}: -3 penalità match solo nel corpo contro titolo lavoratori")
 
-    # ======================================================
-    # FAMIGLIA UNIFICATA FORMAZIONE_LAVORATORI
-    # ======================================================
     fl_score = (
         scores["FORMAZIONE_GENERALE"] +
         scores["FORMAZIONE_SPECIFICA"] +
@@ -1237,31 +1237,33 @@ if best_family == "RLS":
     if fl_score >= 6:
         modulo = ""
 
-        if scores["FORMAZIONE_GENERALE"] >= scores["FORMAZIONE_SPECIFICA"] and scores["FORMAZIONE_GENERALE"] >= scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]:
+        if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= max(scores["FORMAZIONE_GENERALE"], scores["FORMAZIONE_SPECIFICA"]) and is_update:
+            modulo = "aggiornamento"
+            tipo = "aggiornamento"
+        elif scores["FORMAZIONE_GENERALE"] >= scores["FORMAZIONE_SPECIFICA"]:
             modulo = "generale"
-        elif scores["FORMAZIONE_SPECIFICA"] >= scores["FORMAZIONE_GENERALE"]:
-            if "rischio alto" in title_blob:
+            tipo = "base"
+        else:
+            if "rischio alto" in title_blob or "rischio alto" in full_blob:
                 modulo = "specifica_rischio_alto"
-            elif "rischio medio" in title_blob:
+            elif "rischio medio" in title_blob or "rischio medio" in full_blob:
                 modulo = "specifica_rischio_medio"
-            elif "rischio basso" in title_blob:
+            elif "rischio basso" in title_blob or "rischio basso" in full_blob:
                 modulo = "specifica_rischio_basso"
             else:
                 modulo = "specifica"
-        elif scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] > 0:
-            modulo = "aggiornamento"
-
-        tipo = "aggiornamento" if is_update else "base"
+            tipo = "base"
 
         debug.append(f"famiglia unificata FORMAZIONE_LAVORATORI (score={fl_score}, modulo={modulo}, tipo={tipo})")
         return "FORMAZIONE_LAVORATORI", tipo, modulo, scores, debug
 
-    # ======================================================
-    # FALLBACK STANDARD
-    # ======================================================
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_family, best_score = ordered[0]
     second_family, second_score = ordered[1]
+
+    if best_family == "RLS":
+        debug.append("RLS forzato come aggiornamento")
+        return "RLS", "aggiornamento", "", scores, debug
 
     if best_score <= 0 or (best_score - second_score) <= 1:
         debug.append("famiglia corso incerta")
@@ -1269,6 +1271,8 @@ if best_family == "RLS":
 
     debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
     return best_family, "aggiornamento" if is_update else "base", "", scores, debug
+
+
 # =========================================================
 # DATE PESATE
 # =========================================================
@@ -1460,8 +1464,6 @@ def compute_attestato_confidenza(
         points += 2
     elif date_source == "period_block":
         points += 2
-    elif date_source == "weak_positive":
-        points += 0
 
     ordered = sorted(course_scores.items(), key=lambda x: x[1], reverse=True)
     if len(ordered) >= 2 and (ordered[0][1] - ordered[1][1]) >= 3:
@@ -1826,6 +1828,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         "corso": "",
         "famiglia_corso": "",
         "tipo_percorso": "",
+        "modulo_formazione_lavoratori": "",
         "data_conclusione": "",
         "data_scadenza": "",
         "prossimo_aggiornamento": "",
@@ -1912,6 +1915,7 @@ def apply_category_override(item: Dict[str, Any], forced_category: Optional[str]
         item["corso"] = ""
         item["famiglia_corso"] = ""
         item["tipo_percorso"] = ""
+        item["modulo_formazione_lavoratori"] = ""
         item["data_scadenza"] = ""
         item["prossimo_aggiornamento"] = ""
         item["scadenza_label"] = ""
@@ -1935,7 +1939,7 @@ def apply_category_override(item: Dict[str, Any], forced_category: Optional[str]
 def build_report_attestati(items: List[Dict[str, Any]]) -> str:
     lines = []
     lines.append("REPORT ATTESTATI")
-    lines.append("=" * 140)
+    lines.append("=" * 160)
     lines.append("")
 
     header = " | ".join([
@@ -1944,6 +1948,7 @@ def build_report_attestati(items: List[Dict[str, Any]]) -> str:
         "NOME",
         "CORSO",
         "TIPO_PERCORSO",
+        "MODULO_FL",
         "DATA_CONCLUSIONE",
         "LABEL_SCADENZA",
         "VALORE_SCADENZA",
@@ -1953,7 +1958,7 @@ def build_report_attestati(items: List[Dict[str, Any]]) -> str:
         "EXTRACTION_METHOD",
     ])
     lines.append(header)
-    lines.append("-" * 140)
+    lines.append("-" * 160)
 
     for item in items:
         label = item.get("scadenza_label", "data_scadenza")
@@ -1968,6 +1973,7 @@ def build_report_attestati(items: List[Dict[str, Any]]) -> str:
                 item.get("nome", ""),
                 item.get("corso", ""),
                 item.get("tipo_percorso", ""),
+                item.get("modulo_formazione_lavoratori", ""),
                 item.get("data_conclusione", ""),
                 label,
                 label_value,
@@ -2051,7 +2057,7 @@ def home():
     return {
         "status": "ok",
         "message": "Docu OCR Engine online",
-        "version": "5.1.0"
+        "version": "5.2.0"
     }
 
 
@@ -2117,6 +2123,7 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
                     "corso": "",
                     "famiglia_corso": "",
                     "tipo_percorso": "",
+                    "modulo_formazione_lavoratori": "",
                     "data_conclusione": "",
                     "data_scadenza": "",
                     "prossimo_aggiornamento": "",
@@ -2163,6 +2170,7 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
                 "corso": "",
                 "famiglia_corso": "",
                 "tipo_percorso": "",
+                "modulo_formazione_lavoratori": "",
                 "data_conclusione": "",
                 "data_scadenza": "",
                 "prossimo_aggiornamento": "",
