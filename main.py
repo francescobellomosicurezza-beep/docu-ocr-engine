@@ -1246,15 +1246,21 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
             c["reasons"].append("birth_date_penalty")
         filtered.append(c)
 
-    # 1. priorità assoluta a date forti del corso
-    strong_candidates = [c for c in filtered if "strong_label" in c["reasons"] and c["score"] >= 10]
+    ordered_all = sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
+
+    # 1. priorità assoluta: righe con svolto in data / data svolgimento / concluso il
+    strong_candidates = [
+        c for c in ordered_all
+        if "strong_label" in c["reasons"]
+        and "negative_context" not in c["reasons"]
+        and c["score"] >= 10
+    ]
     if strong_candidates:
-        strong_candidates = sorted(strong_candidates, key=lambda x: (x["score"], x["date"]), reverse=True)
         best = strong_candidates[0]
         debug.append(f"data conclusione scelta da strong_label: {best['raw']}")
-        return best["date"], debug, "strong_score", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
+        return best["date"], debug, "strong_score", ordered_all
 
-    # 2. se esiste un blocco periodo corso, prendo l'ultima data del blocco
+    # 2. blocco periodo SOLO se non esiste strong label
     period_block_match = re.search(
         r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
@@ -1263,25 +1269,31 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
     if period_block_match:
         block = period_block_match.group(0)
         period_dates = extract_dates(block)
-        if period_dates:
-            dt = max(period_dates)
-            debug.append("data conclusione scelta come ultima data di blocco periodo")
-            return dt, debug, "period_block", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
-    # 3. fallback solo su date positive e NON amministrative
+        # filtro date troppo vecchie o chiaramente amministrative
+        valid_period_dates = []
+        for dt in period_dates:
+            if dt.year < 1990 or dt.year > datetime.now().year + 1:
+                continue
+            valid_period_dates.append(dt)
+
+        if valid_period_dates:
+            dt = max(valid_period_dates)
+            debug.append("data conclusione scelta come ultima data valida di blocco periodo")
+            return dt, debug, "period_block", ordered_all
+
+    # 3. fallback solo su date positive non negative_context
     positive = [
-        c for c in filtered
+        c for c in ordered_all
         if c["score"] >= 1 and "negative_context" not in c["reasons"]
     ]
     if positive:
-        positive = sorted(positive, key=lambda x: (x["score"], x["date"]), reverse=True)
         best = positive[0]
         debug.append(f"data conclusione scelta con fallback positivo: {best['raw']}")
-        return best["date"], debug, "weak_positive", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
+        return best["date"], debug, "weak_positive", ordered_all
 
     debug.append("nessuna data conclusione affidabile")
-    return None, debug, "none", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
-
+    return None, debug, "none", ordered_all
 
 # =========================================================
 # HELPERS FILENAME / SCADENZA
