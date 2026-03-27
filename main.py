@@ -1163,15 +1163,49 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
             score = 0
             reasons = []
 
-            if any(lbl in context_norm for lbl in DATE_STRONG_LABELS):
+            strong_hits = [
+                "data di conclusione del corso",
+                "conclusione del corso",
+                "data conclusione corso",
+                "data conclusione",
+                "data di svolgimento del corso",
+                "data di svolgimento",
+                "data svolgimento corso",
+                "svolgimento del corso",
+                "svolto in data",
+                "concluso il",
+                "terminato il",
+                "data fine corso",
+                "fine corso",
+            ]
+            if any(lbl in context_norm for lbl in strong_hits):
                 score += 15
                 reasons.append("strong_label")
 
-            if any(lbl in context_norm for lbl in DATE_WEAK_PERIOD_LABELS):
+            weak_period_hits = [
+                "periodo di svolgimento del corso",
+                "giorni",
+                "dal",
+                "al",
+            ]
+            if any(lbl in context_norm for lbl in weak_period_hits):
                 score += 5
                 reasons.append("period_label")
 
-            if any(neg in context_norm for neg in DATE_NEGATIVE_CONTEXTS):
+            negative_hits = [
+                "nato il",
+                "nata il",
+                "data di nascita",
+                "accreditat",
+                "regione",
+                "d.d.",
+                "d.d. n",
+                "attestato emesso",
+                "data emissione",
+                "rilasciato il",
+                "n. iscrizione",
+            ]
+            if any(neg in context_norm for neg in negative_hits):
                 score -= 20
                 reasons.append("negative_context")
 
@@ -1194,7 +1228,6 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
 
     return candidates
 
-
 def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], str, List[Dict[str, Any]]]:
     debug = []
     candidates = build_date_candidates(text)
@@ -1213,6 +1246,7 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
             c["reasons"].append("birth_date_penalty")
         filtered.append(c)
 
+    # 1. priorità assoluta a date forti del corso
     strong_candidates = [c for c in filtered if "strong_label" in c["reasons"] and c["score"] >= 10]
     if strong_candidates:
         strong_candidates = sorted(strong_candidates, key=lambda x: (x["score"], x["date"]), reverse=True)
@@ -1220,6 +1254,7 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
         debug.append(f"data conclusione scelta da strong_label: {best['raw']}")
         return best["date"], debug, "strong_score", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
+    # 2. se esiste un blocco periodo corso, prendo l'ultima data del blocco
     period_block_match = re.search(
         r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
@@ -1233,6 +1268,7 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
             debug.append("data conclusione scelta come ultima data di blocco periodo")
             return dt, debug, "period_block", sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
+    # 3. fallback solo su date positive e NON amministrative
     positive = [
         c for c in filtered
         if c["score"] >= 1 and "negative_context" not in c["reasons"]
@@ -2049,10 +2085,10 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
 @app.post("/organize-zip")
 async def organize_zip(
     files: Annotated[List[UploadFile], File(...)],
-    confirm_download: Annotated[str, Form(...)],
+    confirm_download: Annotated[Optional[str], Form()] = None,
     overrides_json: Annotated[Optional[str], Form()] = None,
 ):
-    # PROTEZIONE SERVER-SIDE CONTRO ZIP AUTOMATICO
+    # blocco duro anti-download automatico
     if str(confirm_download).strip().lower() != "true":
         raise HTTPException(
             status_code=400,
@@ -2083,4 +2119,4 @@ async def organize_zip(
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="archivio_documenti.zip"'},
-    )
+    ))
