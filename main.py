@@ -681,38 +681,65 @@ def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
 
     return "", "", ""
 
-
 def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
     debug = []
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
+    # 1. priorità assoluta: regex dopo anchor
     nome, cognome, src = extract_name_after_anchor(clean_text)
     if nome and cognome:
         debug.append(f"nome trovato con priorità alta: {src}")
         return nome, cognome, debug
 
+    # 2. riga immediatamente dopo anchor
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
         if any(anchor in line_norm for anchor in NAME_ANCHORS):
-            for cand in lines[i + 1:i + 5]:
+            for cand in lines[i + 1:i + 4]:
+                cand_norm = normalize_line_for_matching(cand)
+
+                # blocco righe palesemente non nominativi
+                if cand_norm.startswith("qualifica"):
+                    continue
+                if cand_norm.startswith("settore di riferimento"):
+                    continue
+                if cand_norm.startswith("codice ateco"):
+                    continue
+                if cand_norm.startswith("il corso"):
+                    continue
+                if cand_norm.startswith("data di"):
+                    continue
+
                 if is_plausible_person_name_line(cand):
                     nome, cognome = split_name_line(cand)
                     if nome and cognome:
                         debug.append("nome trovato nelle righe successive ad anchor")
                         return nome, cognome, debug
 
+    # 3. fallback prima di nato/nata
     for i, line in enumerate(lines):
         if re.search(r"\bnato\b|\bnata\b|\bnato\/a\b", line, re.IGNORECASE):
             prev_candidates = list(reversed(lines[max(0, i - 3):i]))
             for prev in prev_candidates:
+                prev_norm = normalize_line_for_matching(prev)
+                if prev_norm.startswith("qualifica"):
+                    continue
                 if is_plausible_person_name_line(prev):
                     nome, cognome = split_name_line(prev)
                     if nome and cognome:
                         debug.append("nome trovato prima di riga con nato/nata")
                         return nome, cognome, debug
 
-    for cand in lines[:40]:
+    # 4. fallback generico molto più rigido
+    for cand in lines[:25]:
+        cand_norm = normalize_line_for_matching(cand)
+        if cand_norm.startswith("qualifica"):
+            continue
+        if cand_norm.startswith("settore di riferimento"):
+            continue
+        if cand_norm.startswith("codice ateco"):
+            continue
         if is_plausible_person_name_line(cand):
             nome, cognome = split_name_line(cand)
             if nome and cognome:
@@ -1096,8 +1123,7 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 # =========================================================
 # DETECTION CORSO ATTESTATI
 # =========================================================
-
-def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[str, str, Dict[str, int], List[str]]:
+def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[str, str, str, Dict[str, int], List[str]]:
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
     identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
     body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
@@ -1120,8 +1146,14 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "LAVORI_IN_QUOTA": 0,
         "CORSO_NON_RICONOSCIUTO": 0,
     }
+    # FIX: RLS è sempre aggiornamento se non specificato diversamente
+if best_family == "RLS":
+    tipo = "aggiornamento"
+    debug.append("RLS forzato come aggiornamento")
+    return "RLS", tipo, "", scores, debug
 
-    is_update = any(w in full_blob for w in UPDATE_WORDS)
+    # aggiornamento vero solo se c'è scritto aggiornamento nel titolo/testa
+    is_update = "aggiornamento" in title_blob or "agg.to" in title_blob
 
     for family in [
         "PRIMO_SOCCORSO",
@@ -1172,12 +1204,20 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     if "formazione generale" in title_blob:
         scores["FORMAZIONE_GENERALE"] += 4
         debug.append("FORMAZIONE_GENERALE: +4 boost titolo esplicito")
+
     if "formazione specifica" in title_blob:
         scores["FORMAZIONE_SPECIFICA"] += 4
         debug.append("FORMAZIONE_SPECIFICA: +4 boost titolo esplicito")
-    if "aggiornamento" in title_blob and ("formazione lavoratori" in title_blob or "formazione dei lavoratori" in title_blob):
-        scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += 5
-        debug.append("AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +5 boost aggiornamento titolo")
+
+    if "rischio alto" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 3
+        debug.append("FORMAZIONE_SPECIFICA: +3 rischio alto nel titolo")
+    if "rischio medio" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 2
+        debug.append("FORMAZIONE_SPECIFICA: +2 rischio medio nel titolo")
+    if "rischio basso" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 2
+        debug.append("FORMAZIONE_SPECIFICA: +2 rischio basso nel titolo")
 
     if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= 8:
         for family in ["PRIMO_SOCCORSO", "ANTINCENDIO", "PREPOSTO"]:
@@ -1186,9 +1226,8 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
                 debug.append(f"{family}: -3 penalità match solo nel corpo contro titolo lavoratori")
 
     # ======================================================
-    # FIX LOGICO: FORMAZIONE LAVORATORI UNIFICATA
+    # FAMIGLIA UNIFICATA FORMAZIONE_LAVORATORI
     # ======================================================
-
     fl_score = (
         scores["FORMAZIONE_GENERALE"] +
         scores["FORMAZIONE_SPECIFICA"] +
@@ -1196,30 +1235,40 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     )
 
     if fl_score >= 6:
-        debug.append(f"famiglia unificata FORMAZIONE_LAVORATORI (score={fl_score})")
+        modulo = ""
 
-        if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= scores["FORMAZIONE_SPECIFICA"]:
-            tipo = "aggiornamento"
-        else:
-            tipo = "base"
+        if scores["FORMAZIONE_GENERALE"] >= scores["FORMAZIONE_SPECIFICA"] and scores["FORMAZIONE_GENERALE"] >= scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]:
+            modulo = "generale"
+        elif scores["FORMAZIONE_SPECIFICA"] >= scores["FORMAZIONE_GENERALE"]:
+            if "rischio alto" in title_blob:
+                modulo = "specifica_rischio_alto"
+            elif "rischio medio" in title_blob:
+                modulo = "specifica_rischio_medio"
+            elif "rischio basso" in title_blob:
+                modulo = "specifica_rischio_basso"
+            else:
+                modulo = "specifica"
+        elif scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] > 0:
+            modulo = "aggiornamento"
 
-        return "FORMAZIONE_LAVORATORI", tipo, scores, debug
+        tipo = "aggiornamento" if is_update else "base"
 
+        debug.append(f"famiglia unificata FORMAZIONE_LAVORATORI (score={fl_score}, modulo={modulo}, tipo={tipo})")
+        return "FORMAZIONE_LAVORATORI", tipo, modulo, scores, debug
 
     # ======================================================
     # FALLBACK STANDARD
     # ======================================================
-
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_family, best_score = ordered[0]
     second_family, second_score = ordered[1]
 
     if best_score <= 0 or (best_score - second_score) <= 1:
         debug.append("famiglia corso incerta")
-        return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", scores, debug
+        return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", "", scores, debug
 
     debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
-    return best_family, "aggiornamento" if is_update else "base", scores, debug
+    return best_family, "aggiornamento" if is_update else "base", "", scores, debug
 # =========================================================
 # DATE PESATE
 # =========================================================
@@ -1453,7 +1502,7 @@ def parse_attestato(text: str, filename: str) -> Dict[str, Any]:
     nome, cognome, name_debug = extract_name_generic(text)
     debug_notes.extend(name_debug)
 
-    family, tipo_percorso, course_scores, course_debug = score_course_family_by_zone(zones, filename)
+    family, tipo_percorso, modulo_fl, course_scores, course_debug = score_course_family_by_zone(zones, filename)
     debug_notes.extend(course_debug)
 
     conclusion_date, date_debug, date_source, date_candidates = extract_conclusion_date(text)
@@ -1495,6 +1544,7 @@ def parse_attestato(text: str, filename: str) -> Dict[str, Any]:
         "corso": family,
         "famiglia_corso": family,
         "tipo_percorso": tipo_percorso,
+        "modulo_formazione_lavoratori": modulo_fl,
         "data_conclusione": format_date(conclusion_date),
         "data_scadenza": scad_value if scad_label == "data_scadenza" else "",
         "prossimo_aggiornamento": scad_value if scad_label == "prossimo_aggiornamento" else "",
