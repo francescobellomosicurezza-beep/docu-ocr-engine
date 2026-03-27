@@ -901,7 +901,9 @@ def split_text_zones(text: str) -> Dict[str, str]:
 def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
     zones = split_text_zones(text)
+
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
+    identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
     body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
 
     scores = {
@@ -918,137 +920,152 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     }
 
     # ======================================================
-    # ATTESTATI
+    # ATTESTATI - PRIORITÀ MASSIMA AL TITOLO
     # ======================================================
-    attestato_hits_full = count_keywords(blob, ATTESTATO_POSITIVE_SIGNALS)
-    attestato_hits_title = count_keywords(title_blob, ATTESTATO_POSITIVE_SIGNALS)
-
-    if attestato_hits_full >= 2:
-        scores["attestati"] += attestato_hits_full * 2
-        debug["positive_hits"].append(f"attestati:+{attestato_hits_full * 2} segnali attestato full")
-    elif attestato_hits_full == 1:
-        scores["attestati"] += 1
-        debug["positive_hits"].append("attestati:+1 segnale debole attestato full")
-
     if "attestato" in title_blob:
-        scores["attestati"] += 4
-        debug["positive_hits"].append("attestati:+4 parola attestato nel titolo")
+        scores["attestati"] += 8
+        debug["positive_hits"].append("attestati:+8 titolo contiene attestato")
     elif "attestato" in blob:
-        scores["attestati"] += 2
-        debug["positive_hits"].append("attestati:+2 parola attestato nel testo")
-
-    if attestato_hits_title >= 1:
         scores["attestati"] += 3
-        debug["positive_hits"].append("attestati:+3 segnali attestato nel titolo")
+        debug["positive_hits"].append("attestati:+3 testo contiene attestato")
 
-    if "programma del corso" in blob and ("ha frequentato" in blob or "si attesta che" in blob):
+    attestato_title_hits = count_keywords(title_blob, ATTESTATO_POSITIVE_SIGNALS)
+    attestato_full_hits = count_keywords(blob, ATTESTATO_POSITIVE_SIGNALS)
+
+    if attestato_title_hits >= 1:
+        scores["attestati"] += attestato_title_hits * 3
+        debug["positive_hits"].append(f"attestati:+{attestato_title_hits * 3} segnali attestato nel titolo")
+
+    if attestato_full_hits >= 2:
         scores["attestati"] += 2
-        debug["positive_hits"].append("attestati:+2 programma + formulazione tipica")
+        debug["positive_hits"].append("attestati:+2 conferma dal corpo")
+
+    if "conferito a" in blob or "rilasciato a" in blob:
+        scores["attestati"] += 2
+        debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
 
     # ======================================================
     # NOMINE
     # ======================================================
-    if "nomina" in blob:
-        scores["nomine"] += 6
-        debug["positive_hits"].append("nomine:+6 nomina")
-    if "designazione" in blob:
+    if "nomina" in title_blob:
+        scores["nomine"] += 8
+        debug["positive_hits"].append("nomine:+8 titolo contiene nomina")
+    elif "nomina" in blob:
         scores["nomine"] += 4
-        debug["positive_hits"].append("nomine:+4 designazione")
-    if "conferimento incarico" in blob:
-        scores["nomine"] += 4
-        debug["positive_hits"].append("nomine:+4 conferimento incarico")
+        debug["positive_hits"].append("nomine:+4 testo contiene nomina")
+
+    if "designazione" in title_blob:
+        scores["nomine"] += 5
+        debug["positive_hits"].append("nomine:+5 designazione nel titolo")
+    elif "designazione" in blob:
+        scores["nomine"] += 2
+
     if "lettera di nomina" in blob:
         scores["nomine"] += 4
-        debug["positive_hits"].append("nomine:+4 lettera di nomina")
 
     for _, kws in NOMINA_ROLE_KEYWORDS.items():
-        if has_any_keyword(blob, kws):
+        if has_any_keyword(title_blob, kws):
+            scores["nomine"] += 2
+        elif has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
     # ======================================================
     # VISITE MEDICHE
     # ======================================================
-    if "giudizio di idoneita" in blob or "giudizio di idoneità" in blob:
-        scores["visite_mediche"] += 7
-        debug["positive_hits"].append("visite:+7 giudizio di idoneità")
+    if "giudizio di idoneita" in title_blob or "giudizio di idoneità" in title_blob:
+        scores["visite_mediche"] += 8
+        debug["positive_hits"].append("visite:+8 giudizio nel titolo")
+    elif "giudizio di idoneita" in blob or "giudizio di idoneità" in blob:
+        scores["visite_mediche"] += 5
+        debug["positive_hits"].append("visite:+5 giudizio nel testo")
+
     if "medico competente" in blob:
-        scores["visite_mediche"] += 4
-        debug["positive_hits"].append("visite:+4 medico competente")
+        scores["visite_mediche"] += 3
     if "sorveglianza sanitaria" in blob:
         scores["visite_mediche"] += 3
-        debug["positive_hits"].append("visite:+3 sorveglianza sanitaria")
     if "prescrizioni" in blob:
         scores["visite_mediche"] += 2
-        debug["positive_hits"].append("visite:+2 prescrizioni")
     if "idoneo" in blob or "idonea" in blob:
         scores["visite_mediche"] += 2
 
     # ======================================================
     # VERBALI DPI
-    # QUI STA IL FIX IMPORTANTE
-    # Non basta la parola "dpi" da sola, perché può stare nel programma di un attestato.
+    # SOLO SE CI SONO INDIZI DA VERBALE, NON DA PROGRAMMA CORSO
     # ======================================================
+    dpi_score = 0
 
-    dpi_strong_hits = 0
+    if "verbale di consegna" in title_blob:
+        dpi_score += 8
+        debug["positive_hits"].append("dpi:+8 verbale di consegna nel titolo")
+    elif "verbale di consegna" in blob:
+        dpi_score += 4
+        debug["positive_hits"].append("dpi:+4 verbale di consegna nel testo")
 
-    if "verbale di consegna" in blob:
-        scores["verbali_dpi"] += 5
-        dpi_strong_hits += 1
-        debug["positive_hits"].append("dpi:+5 verbale di consegna")
-
-    if "consegna dpi" in blob:
-        scores["verbali_dpi"] += 5
-        dpi_strong_hits += 1
-        debug["positive_hits"].append("dpi:+5 consegna dpi")
+    if "consegna dpi" in title_blob:
+        dpi_score += 7
+        debug["positive_hits"].append("dpi:+7 consegna dpi nel titolo")
+    elif "consegna dpi" in blob:
+        dpi_score += 4
 
     if "firma per ricevuta" in blob:
-        scores["verbali_dpi"] += 4
-        dpi_strong_hits += 1
-        debug["positive_hits"].append("dpi:+4 firma per ricevuta")
-
-    if "dispositivi di protezione individuale" in title_blob:
-        scores["verbali_dpi"] += 4
-        dpi_strong_hits += 1
-        debug["positive_hits"].append("dpi:+4 dispositivi... nel titolo")
-
+        dpi_score += 4
     if "il lavoratore dichiara di aver ricevuto" in blob:
-        scores["verbali_dpi"] += 5
-        dpi_strong_hits += 1
-        debug["positive_hits"].append("dpi:+5 dichiarazione ricezione")
+        dpi_score += 5
+    if "dispositivi di protezione individuale" in title_blob:
+        dpi_score += 5
 
-    # match debole: la sola parola DPI NON basta quasi mai
+    # la sola parola DPI nel corpo del programma NON conta
     if re.search(r"\bdpi\b", title_blob):
-        scores["verbali_dpi"] += 2
-        debug["positive_hits"].append("dpi:+2 sigla DPI nel titolo")
-    elif re.search(r"\bdpi\b", body_blob):
-        scores["verbali_dpi"] += 0
-        debug["positive_hits"].append("dpi:+0 sigla DPI nel corpo ignorata")
+        dpi_score += 2
+    # se è solo nel body, zero
 
-    # se non ci sono almeno 2 segnali forti, abbasso drasticamente il punteggio DPI
-    if dpi_strong_hits == 0:
-        scores["verbali_dpi"] = max(0, scores["verbali_dpi"] - 4)
-        debug["negative_hits"].append("dpi:-4 nessun segnale forte di verbale")
-    elif dpi_strong_hits == 1:
-        scores["verbali_dpi"] = max(0, scores["verbali_dpi"] - 2)
-        debug["negative_hits"].append("dpi:-2 un solo segnale forte di verbale")
+    scores["verbali_dpi"] = dpi_score
 
     # ======================================================
     # DOCUMENTI AZIENDALI
+    # QUI IL FIX CHIAVE:
+    # contano quasi solo segnali forti nel titolo, non nel programma
     # ======================================================
-    if re.search(r"\bdvr\b", blob):
-        scores["documenti_aziendali"] += 5
-    if "valutazione dei rischi" in blob:
-        scores["documenti_aziendali"] += 5
-    if "organigramma" in blob:
-        scores["documenti_aziendali"] += 3
-    if re.search(r"\bpos\b", blob):
-        scores["documenti_aziendali"] += 3
-    if re.search(r"\bpsc\b", blob):
-        scores["documenti_aziendali"] += 3
-    if "procedura" in blob:
-        scores["documenti_aziendali"] += 2
-    if "protocollo" in blob:
-        scores["documenti_aziendali"] += 2
+    doc_score = 0
+
+    if re.search(r"\bdvr\b", title_blob):
+        doc_score += 9
+        debug["positive_hits"].append("doc_az:+9 DVR nel titolo")
+    elif re.search(r"\bdvr\b", blob):
+        doc_score += 4
+
+    if "valutazione dei rischi" in title_blob:
+        doc_score += 9
+        debug["positive_hits"].append("doc_az:+9 valutazione rischi nel titolo")
+    elif "valutazione dei rischi" in body_blob:
+        doc_score += 0  # nel programma corsi non deve spostare la categoria
+
+    if re.search(r"\bpos\b", title_blob):
+        doc_score += 8
+    elif re.search(r"\bpos\b", blob):
+        doc_score += 3
+
+    if re.search(r"\bpsc\b", title_blob):
+        doc_score += 8
+    elif re.search(r"\bpsc\b", blob):
+        doc_score += 3
+
+    if "organigramma" in title_blob:
+        doc_score += 7
+    elif "organigramma" in body_blob:
+        doc_score += 0
+
+    if "procedura" in title_blob:
+        doc_score += 6
+    elif "procedura" in body_blob:
+        doc_score += 0
+
+    if "protocollo" in title_blob:
+        doc_score += 5
+    elif "protocollo" in body_blob:
+        doc_score += 0
+
+    scores["documenti_aziendali"] = doc_score
 
     # ======================================================
     # PENALITÀ INCROCIATE
@@ -1058,25 +1075,17 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
             scores["attestati"] -= 2
             debug["negative_hits"].append(f"attestati:-2 presenza '{neg}'")
 
-    # Se il titolo dice chiaramente attestato, abbasso DPI
-    if "attestato" in title_blob and scores["verbali_dpi"] > 0:
+    # Se il titolo è chiaramente da attestato, abbassa le altre categorie borderline
+    if "attestato" in title_blob:
         scores["verbali_dpi"] = max(0, scores["verbali_dpi"] - 4)
+        scores["documenti_aziendali"] = max(0, scores["documenti_aziendali"] - 5)
         debug["negative_hits"].append("dpi:-4 titolo da attestato")
+        debug["negative_hits"].append("doc_az:-5 titolo da attestato")
 
-    # Se il titolo dice chiaramente verbale consegna dpi, abbasso attestati
-    if "verbale di consegna" in title_blob or "consegna dpi" in title_blob:
-        scores["attestati"] = max(0, scores["attestati"] - 4)
-        debug["negative_hits"].append("attestati:-4 titolo da verbale dpi")
-
-    if scores["nomine"] >= 6:
-        scores["attestati"] -= 4
-        debug["negative_hits"].append("attestati:-4 forte match nomina")
-    if scores["visite_mediche"] >= 6:
-        scores["attestati"] -= 4
-        debug["negative_hits"].append("attestati:-4 forte match visita")
-    if scores["documenti_aziendali"] >= 5:
-        scores["attestati"] -= 3
-        debug["negative_hits"].append("attestati:-3 forte match documento aziendale")
+    # Se il titolo è chiaramente da documento aziendale, abbassa attestati
+    if any(x in title_blob for x in ["dvr", "valutazione dei rischi", "pos", "psc"]):
+        scores["attestati"] = max(0, scores["attestati"] - 5)
+        debug["negative_hits"].append("attestati:-5 titolo da documento aziendale")
 
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_category, best_score = ordered[0]
