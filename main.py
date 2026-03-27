@@ -29,7 +29,7 @@ if creds_json:
 # APP
 # =========================================================
 
-app = FastAPI(title="Docu OCR Engine", version="5.0.0")
+app = FastAPI(title="Docu OCR Engine", version="5.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -303,6 +303,7 @@ ATTESTATO_POSITIVE_SIGNALS = [
     "attestato",
     "attestato di frequenza",
     "attestato di formazione",
+    "attestato di partecipazione",
     "si attesta che",
     "certifica che",
     "ha frequentato",
@@ -870,7 +871,8 @@ def split_text_zones(text: str) -> Dict[str, str]:
     lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
 
     title_lines = lines[:15]
-    title_zone = "\n".join(title_lines)
+    identity_lines = lines[:12]
+    body_lines = lines[15:] if len(lines) > 15 else []
 
     anchor_idx = -1
     for i, line in enumerate(lines[:50]):
@@ -881,16 +883,11 @@ def split_text_zones(text: str) -> Dict[str, str]:
 
     if anchor_idx >= 0:
         identity_lines = lines[max(0, anchor_idx - 2): min(len(lines), anchor_idx + 5)]
-    else:
-        identity_lines = lines[:12]
-
-    body_lines = lines[15:] if len(lines) > 15 else []
-    body_zone = "\n".join(body_lines)
 
     return {
         "title_zone": normalize_spaces("\n".join(title_lines)),
         "identity_zone": normalize_spaces("\n".join(identity_lines)),
-        "body_zone": normalize_spaces(body_zone),
+        "body_zone": normalize_spaces("\n".join(body_lines)),
         "full_text": normalize_spaces(text),
     }
 
@@ -898,12 +895,12 @@ def split_text_zones(text: str) -> Dict[str, str]:
 # =========================================================
 # CLASSIFICAZIONE DOCUMENTI
 # =========================================================
+
 def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
     zones = split_text_zones(text)
 
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
-    identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
     body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
 
     scores = {
@@ -919,9 +916,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         "negative_hits": [],
     }
 
-    # ======================================================
-    # ATTESTATI - PRIORITÀ MASSIMA AL TITOLO
-    # ======================================================
+    # ---------------------
+    # ATTESTATI
+    # ---------------------
     if "attestato" in title_blob:
         scores["attestati"] += 8
         debug["positive_hits"].append("attestati:+8 titolo contiene attestato")
@@ -944,9 +941,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["attestati"] += 2
         debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
 
-    # ======================================================
+    # ---------------------
     # NOMINE
-    # ======================================================
+    # ---------------------
     if "nomina" in title_blob:
         scores["nomine"] += 8
         debug["positive_hits"].append("nomine:+8 titolo contiene nomina")
@@ -969,9 +966,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         elif has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
-    # ======================================================
+    # ---------------------
     # VISITE MEDICHE
-    # ======================================================
+    # ---------------------
     if "giudizio di idoneita" in title_blob or "giudizio di idoneità" in title_blob:
         scores["visite_mediche"] += 8
         debug["positive_hits"].append("visite:+8 giudizio nel titolo")
@@ -988,10 +985,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "idoneo" in blob or "idonea" in blob:
         scores["visite_mediche"] += 2
 
-    # ======================================================
+    # ---------------------
     # VERBALI DPI
-    # SOLO SE CI SONO INDIZI DA VERBALE, NON DA PROGRAMMA CORSO
-    # ======================================================
+    # ---------------------
     dpi_score = 0
 
     if "verbale di consegna" in title_blob:
@@ -1014,18 +1010,14 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "dispositivi di protezione individuale" in title_blob:
         dpi_score += 5
 
-    # la sola parola DPI nel corpo del programma NON conta
     if re.search(r"\bdpi\b", title_blob):
         dpi_score += 2
-    # se è solo nel body, zero
 
     scores["verbali_dpi"] = dpi_score
 
-    # ======================================================
+    # ---------------------
     # DOCUMENTI AZIENDALI
-    # QUI IL FIX CHIAVE:
-    # contano quasi solo segnali forti nel titolo, non nel programma
-    # ======================================================
+    # ---------------------
     doc_score = 0
 
     if re.search(r"\bdvr\b", title_blob):
@@ -1037,8 +1029,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "valutazione dei rischi" in title_blob:
         doc_score += 9
         debug["positive_hits"].append("doc_az:+9 valutazione rischi nel titolo")
-    elif "valutazione dei rischi" in body_blob:
-        doc_score += 0  # nel programma corsi non deve spostare la categoria
 
     if re.search(r"\bpos\b", title_blob):
         doc_score += 8
@@ -1052,37 +1042,29 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 
     if "organigramma" in title_blob:
         doc_score += 7
-    elif "organigramma" in body_blob:
-        doc_score += 0
 
     if "procedura" in title_blob:
         doc_score += 6
-    elif "procedura" in body_blob:
-        doc_score += 0
 
     if "protocollo" in title_blob:
         doc_score += 5
-    elif "protocollo" in body_blob:
-        doc_score += 0
 
     scores["documenti_aziendali"] = doc_score
 
-    # ======================================================
+    # ---------------------
     # PENALITÀ INCROCIATE
-    # ======================================================
+    # ---------------------
     for neg in ATTESTATO_NEGATIVE_SIGNALS:
         if neg in blob:
             scores["attestati"] -= 2
             debug["negative_hits"].append(f"attestati:-2 presenza '{neg}'")
 
-    # Se il titolo è chiaramente da attestato, abbassa le altre categorie borderline
     if "attestato" in title_blob:
         scores["verbali_dpi"] = max(0, scores["verbali_dpi"] - 4)
         scores["documenti_aziendali"] = max(0, scores["documenti_aziendali"] - 5)
         debug["negative_hits"].append("dpi:-4 titolo da attestato")
         debug["negative_hits"].append("doc_az:-5 titolo da attestato")
 
-    # Se il titolo è chiaramente da documento aziendale, abbassa attestati
     if any(x in title_blob for x in ["dvr", "valutazione dei rischi", "pos", "psc"]):
         scores["attestati"] = max(0, scores["attestati"] - 5)
         debug["negative_hits"].append("attestati:-5 titolo da documento aziendale")
@@ -1109,6 +1091,8 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         return "altri_da_verificare", scores, meta
 
     return best_category, scores, meta
+
+
 # =========================================================
 # DETECTION CORSO ATTESTATI
 # =========================================================
@@ -1237,49 +1221,15 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
             score = 0
             reasons = []
 
-            strong_hits = [
-                "data di conclusione del corso",
-                "conclusione del corso",
-                "data conclusione corso",
-                "data conclusione",
-                "data di svolgimento del corso",
-                "data di svolgimento",
-                "data svolgimento corso",
-                "svolgimento del corso",
-                "svolto in data",
-                "concluso il",
-                "terminato il",
-                "data fine corso",
-                "fine corso",
-            ]
-            if any(lbl in context_norm for lbl in strong_hits):
+            if any(lbl in context_norm for lbl in DATE_STRONG_LABELS):
                 score += 15
                 reasons.append("strong_label")
 
-            weak_period_hits = [
-                "periodo di svolgimento del corso",
-                "giorni",
-                "dal",
-                "al",
-            ]
-            if any(lbl in context_norm for lbl in weak_period_hits):
+            if any(lbl in context_norm for lbl in DATE_WEAK_PERIOD_LABELS):
                 score += 5
                 reasons.append("period_label")
 
-            negative_hits = [
-                "nato il",
-                "nata il",
-                "data di nascita",
-                "accreditat",
-                "regione",
-                "d.d.",
-                "d.d. n",
-                "attestato emesso",
-                "data emissione",
-                "rilasciato il",
-                "n. iscrizione",
-            ]
-            if any(neg in context_norm for neg in negative_hits):
+            if any(neg in context_norm for neg in DATE_NEGATIVE_CONTEXTS):
                 score -= 20
                 reasons.append("negative_context")
 
@@ -1302,6 +1252,7 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
 
     return candidates
 
+
 def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], str, List[Dict[str, Any]]]:
     debug = []
     candidates = build_date_candidates(text)
@@ -1322,7 +1273,6 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
 
     ordered_all = sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
-    # 1. priorità assoluta: righe con svolto in data / data svolgimento / concluso il
     strong_candidates = [
         c for c in ordered_all
         if "strong_label" in c["reasons"]
@@ -1334,7 +1284,6 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
         debug.append(f"data conclusione scelta da strong_label: {best['raw']}")
         return best["date"], debug, "strong_score", ordered_all
 
-    # 2. blocco periodo SOLO se non esiste strong label
     period_block_match = re.search(
         r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
@@ -1344,19 +1293,16 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
         block = period_block_match.group(0)
         period_dates = extract_dates(block)
 
-        # filtro date troppo vecchie o chiaramente amministrative
         valid_period_dates = []
         for dt in period_dates:
-            if dt.year < 1990 or dt.year > datetime.now().year + 1:
-                continue
-            valid_period_dates.append(dt)
+            if 1990 <= dt.year <= datetime.now().year + 1:
+                valid_period_dates.append(dt)
 
         if valid_period_dates:
             dt = max(valid_period_dates)
             debug.append("data conclusione scelta come ultima data valida di blocco periodo")
             return dt, debug, "period_block", ordered_all
 
-    # 3. fallback solo su date positive non negative_context
     positive = [
         c for c in ordered_all
         if c["score"] >= 1 and "negative_context" not in c["reasons"]
@@ -1368,6 +1314,7 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
 
     debug.append("nessuna data conclusione affidabile")
     return None, debug, "none", ordered_all
+
 
 # =========================================================
 # HELPERS FILENAME / SCADENZA
@@ -2031,7 +1978,7 @@ def home():
     return {
         "status": "ok",
         "message": "Docu OCR Engine online",
-        "version": "5.0.0"
+        "version": "5.1.0"
     }
 
 
@@ -2174,7 +2121,6 @@ async def organize_zip(
     confirm_download: Annotated[Optional[str], Form()] = None,
     overrides_json: Annotated[Optional[str], Form()] = None,
 ):
-    # blocco duro anti-download automatico
     if str(confirm_download).strip().lower() != "true":
         raise HTTPException(
             status_code=400,
@@ -2205,4 +2151,4 @@ async def organize_zip(
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="archivio_documenti.zip"'},
-    ))
+    )
