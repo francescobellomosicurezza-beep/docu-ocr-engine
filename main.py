@@ -1185,14 +1185,38 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
                 scores[family] -= 3
                 debug.append(f"{family}: -3 penalità match solo nel corpo contro titolo lavoratori")
 
-    ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-    best_family, best_score = ordered[0]
-    second_family, second_score = ordered[1]
+    # ======================================================
+# FIX LOGICO: FORMAZIONE LAVORATORI UNIFICATA
+# ======================================================
 
-    if best_score <= 0 or (best_score - second_score) <= 1:
-        debug.append("famiglia corso incerta")
-        return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", scores, debug
+fl_score = (
+    scores["FORMAZIONE_GENERALE"] +
+    scores["FORMAZIONE_SPECIFICA"] +
+    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]
+)
 
+if fl_score >= 6:
+    debug.append(f"famiglia unificata FORMAZIONE_LAVORATORI (score={fl_score})")
+
+    if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= scores["FORMAZIONE_SPECIFICA"]:
+        tipo = "aggiornamento"
+    else:
+        tipo = "base"
+
+    return "FORMAZIONE_LAVORATORI", tipo, scores, debug
+
+
+# fallback standard
+ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+best_family, best_score = ordered[0]
+second_family, second_score = ordered[1]
+
+if best_score <= 0 or (best_score - second_score) <= 1:
+    debug.append("famiglia corso incerta")
+    return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", scores, debug
+
+debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
+return best_family, "aggiornamento" if is_update else "base", scores, debug
     debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
     return best_family, "aggiornamento" if is_update else "base", scores, debug
 
