@@ -721,31 +721,20 @@ def looks_like_role_or_label(text: str) -> bool:
         "autista",
         "responsabile",
         "amministratore",
+        "verifica",
+        "apprendimento",
+        "test",
+        "superamento",
+        "esito",
     ]
-    bad_contains += [
-    "verifica",
-    "apprendimento",
-    "test",
-    "superamento",
-    "esito",
-    ]
+
     if any(tok in s for tok in bad_contains):
         return True
 
     return False
 
+
 def validate_person_candidate(line: str) -> Tuple[bool, str]:
-    raw = normalize_spaces(line)
-    if not raw:
-        return False, "vuoto"
-
-    if looks_like_company_or_org(raw):
-        return False, "sembra_azienda"
-
-    if looks_like_role_or_label(raw):
-        return False, "sembra_ruolo_o_label"
-
-    def validate_person_candidate(line: str) -> Tuple[bool, str]:
     raw = normalize_spaces(line)
     if not raw:
         return False, "vuoto"
@@ -776,6 +765,7 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
 
 def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
     anchor_pattern = "|".join(re.escape(a) for a in NAME_ANCHORS)
+
     m = re.search(
         rf"(?:{anchor_pattern})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s&\.]{{5,140}})",
         clean_text,
@@ -783,6 +773,23 @@ def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
     )
     if not m:
         return "", "", ""
+
+    raw = normalize_spaces(m.group(1))
+
+    raw = re.split(
+        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica|settore di riferimento|codice ateco)\b",
+        raw,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,.;:-")
+
+    ok, _ = validate_person_candidate(raw)
+
+    if ok:
+        nome, cognome = split_name_line(raw)
+        if nome and cognome:
+            return nome, cognome, "anchor_regex"
+
+    return "", "", ""
 
     raw = normalize_spaces(m.group(1))
     raw = re.split(
