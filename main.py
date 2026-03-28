@@ -622,6 +622,12 @@ def is_plausible_person_name_line(line: str) -> bool:
         "qualifica",
         "settore di riferimento",
         "codice ateco",
+        "qualifica",
+        "settore di riferimento",
+        "codice ateco",
+        "azienda",
+        "srl",
+        "spa",
     ]
     if any(tok in line_norm for tok in forbidden):
         return False
@@ -657,11 +663,99 @@ def split_name_line(line: str) -> Tuple[str, str]:
 
     return nome, cognome
 
+def looks_like_company_or_org(text: str) -> bool:
+    s = normalize_line_for_matching(text)
+
+    blacklist_tokens = [
+        "srl", "s.r.l", "spa", "s.p.a", "snc", "sas", "s.a.s", "s.n.c",
+        "societa", "società", "azienda", "impresa", "ente", "istituto",
+        "associazione", "cooperativa", "consorzio", "fondazione",
+        "academy", "training", "formazione", "consulting",
+        "centro studi", "studio", "servizi", "service",
+        "a.s.q.&s", "asq&s", "asq", "safety", "quality",
+    ]
+
+    if any(tok in s for tok in blacklist_tokens):
+        return True
+
+    # sigle o ragioni sociali piene di simboli
+    if "&" in text:
+        return True
+
+    # pattern tipo "XYZ SRL"
+    if re.search(r"\b(srl|spa|snc|sas)\b", s):
+        return True
+
+    return False
+
+
+def looks_like_role_or_label(text: str) -> bool:
+    s = normalize_line_for_matching(text)
+
+    bad_prefixes = [
+        "qualifica",
+        "mansione",
+        "settore di riferimento",
+        "codice ateco",
+        "il corso",
+        "data di",
+        "durata",
+        "ore",
+        "modulo",
+        "programma",
+        "attestato",
+        "corso",
+        "rischio",
+        "luogo",
+        "docente",
+    ]
+
+    if any(s.startswith(p) for p in bad_prefixes):
+        return True
+
+    bad_contains = [
+        "operaio",
+        "impiegato",
+        "preposto",
+        "magazziniere",
+        "autista",
+        "responsabile",
+        "amministratore",
+    ]
+    if any(tok in s for tok in bad_contains):
+        return True
+
+    return False
+
+
+def validate_person_candidate(line: str) -> Tuple[bool, str]:
+    raw = normalize_spaces(line)
+    if not raw:
+        return False, "vuoto"
+
+    if looks_like_company_or_org(raw):
+        return False, "sembra_azienda"
+
+    if looks_like_role_or_label(raw):
+        return False, "sembra_ruolo_o_label"
+
+    if not is_plausible_person_name_line(raw):
+        return False, "non_plausibile"
+
+    nome, cognome = split_name_line(raw)
+    if not nome or not cognome:
+        return False, "split_non_valido"
+
+    full = f"{nome} {cognome}".strip()
+    if looks_like_company_or_org(full):
+        return False, "split_sembra_azienda"
+
+    return True, "ok"
 
 def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
     anchor_pattern = "|".join(re.escape(a) for a in NAME_ANCHORS)
     m = re.search(
-        rf"(?:{anchor_pattern})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s]{{5,120}})",
+        rf"(?:{anchor_pattern})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s&\.]{{5,140}})",
         clean_text,
         re.IGNORECASE,
     )
@@ -670,74 +764,62 @@ def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
 
     raw = normalize_spaces(m.group(1))
     raw = re.split(
-        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica)\b",
+        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica|settore di riferimento|codice ateco)\b",
         raw,
         flags=re.IGNORECASE,
     )[0].strip(" ,.;:-")
 
-    if is_plausible_person_name_line(raw):
+    ok, _ = validate_person_candidate(raw)
+    if ok:
         nome, cognome = split_name_line(raw)
         if nome and cognome:
             return nome, cognome, "anchor_regex"
 
     return "", "", ""
 
-
 def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
     debug = []
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
+    # 1. priorità assoluta: regex dopo anchor
     nome, cognome, src = extract_name_after_anchor(clean_text)
     if nome and cognome:
         debug.append(f"nome trovato con priorità alta: {src}")
         return nome, cognome, debug
 
+    # 2. riga immediatamente dopo anchor
     for i, line in enumerate(lines):
         line_norm = normalize_line_for_matching(line)
         if any(anchor in line_norm for anchor in NAME_ANCHORS):
-            for cand in lines[i + 1:i + 4]:
-                cand_norm = normalize_line_for_matching(cand)
-
-                if cand_norm.startswith("qualifica"):
-                    continue
-                if cand_norm.startswith("settore di riferimento"):
-                    continue
-                if cand_norm.startswith("codice ateco"):
-                    continue
-                if cand_norm.startswith("il corso"):
-                    continue
-                if cand_norm.startswith("data di"):
-                    continue
-
-                if is_plausible_person_name_line(cand):
+            for cand in lines[i + 1:i + 5]:
+                ok, reason = validate_person_candidate(cand)
+                if ok:
                     nome, cognome = split_name_line(cand)
                     if nome and cognome:
                         debug.append("nome trovato nelle righe successive ad anchor")
                         return nome, cognome, debug
+                else:
+                    debug.append(f"candidato scartato dopo anchor: {reason}")
 
+    # 3. fallback prima di riga con nato/nata
     for i, line in enumerate(lines):
         if re.search(r"\bnato\b|\bnata\b|\bnato\/a\b", line, re.IGNORECASE):
             prev_candidates = list(reversed(lines[max(0, i - 3):i]))
             for prev in prev_candidates:
-                prev_norm = normalize_line_for_matching(prev)
-                if prev_norm.startswith("qualifica"):
-                    continue
-                if is_plausible_person_name_line(prev):
+                ok, reason = validate_person_candidate(prev)
+                if ok:
                     nome, cognome = split_name_line(prev)
                     if nome and cognome:
                         debug.append("nome trovato prima di riga con nato/nata")
                         return nome, cognome, debug
+                else:
+                    debug.append(f"candidato scartato prima di nato/nata: {reason}")
 
+    # 4. fallback generico molto rigido
     for cand in lines[:25]:
-        cand_norm = normalize_line_for_matching(cand)
-        if cand_norm.startswith("qualifica"):
-            continue
-        if cand_norm.startswith("settore di riferimento"):
-            continue
-        if cand_norm.startswith("codice ateco"):
-            continue
-        if is_plausible_person_name_line(cand):
+        ok, reason = validate_person_candidate(cand)
+        if ok:
             nome, cognome = split_name_line(cand)
             if nome and cognome:
                 debug.append("nome trovato con fallback riga plausibile")
@@ -745,7 +827,6 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
 
     debug.append("nome non trovato")
     return "", "", debug
-
 
 # =========================================================
 # OCR GOOGLE VISION
