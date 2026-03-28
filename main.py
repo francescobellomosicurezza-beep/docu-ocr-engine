@@ -734,7 +734,6 @@ def looks_like_role_or_label(text: str) -> bool:
 
     return False
 
-
 def validate_person_candidate(line: str) -> Tuple[bool, str]:
     raw = normalize_spaces(line)
     if not raw:
@@ -753,15 +752,16 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     if not nome or not cognome:
         return False, "split_non_valido"
 
+    # evita robe tipo "Con", "Il", ecc.
+    if len(nome) <= 2 or len(cognome) <= 2:
+        return False, "troppo corto"
+
     full = f"{nome} {cognome}".strip()
     if looks_like_company_or_org(full):
         return False, "split_sembra_azienda"
-   
-# evita robe tipo "Con", "Il", ecc
-if len(nome) <= 2 or len(cognome) <= 2:
-    return False, "troppo corto"
-   
+
     return True, "ok"
+
 
 def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
     anchor_pattern = "|".join(re.escape(a) for a in NAME_ANCHORS)
