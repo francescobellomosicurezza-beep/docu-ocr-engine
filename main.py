@@ -722,6 +722,13 @@ def looks_like_role_or_label(text: str) -> bool:
         "responsabile",
         "amministratore",
     ]
+    bad_contains += [
+    "verifica",
+    "apprendimento",
+    "test",
+    "superamento",
+    "esito",
+    ]
     if any(tok in s for tok in bad_contains):
         return True
 
@@ -749,7 +756,11 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     full = f"{nome} {cognome}".strip()
     if looks_like_company_or_org(full):
         return False, "split_sembra_azienda"
-
+   
+# evita robe tipo "Con", "Il", ecc
+if len(nome) <= 2 or len(cognome) <= 2:
+    return False, "troppo corto"
+   
     return True, "ok"
 
 def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
@@ -816,17 +827,30 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
                 else:
                     debug.append(f"candidato scartato prima di nato/nata: {reason}")
 
-    # 4. fallback generico molto rigido
-    for cand in lines[:25]:
-        ok, reason = validate_person_candidate(cand)
-        if ok:
-            nome, cognome = split_name_line(cand)
-            if nome and cognome:
-                debug.append("nome trovato con fallback riga plausibile")
-                return nome, cognome, debug
+    # 4. fallback ULTRA RESTRITTIVO (solo nomi forti)
+for cand in lines[:20]:
+    ok, reason = validate_person_candidate(cand)
 
-    debug.append("nome non trovato")
-    return "", "", debug
+    if not ok:
+        debug.append(f"candidato scartato con fallback: {reason}")
+        continue
+
+    # 🔥 NUOVA REGOLA: deve essere tutto maiuscolo (tipico attestati)
+    if not cand.isupper():
+        debug.append("candidato scartato: non tutto maiuscolo")
+        continue
+
+    # 🔥 almeno 2 parole vere
+    parts = cand.split()
+    if len(parts) < 2:
+        debug.append("candidato scartato: meno di 2 parole")
+        continue
+
+    nome, cognome = split_name_line(cand)
+
+    if nome and cognome:
+        debug.append("nome trovato con fallback STRONG (uppercase)")
+        return nome, cognome, debug
 
 # =========================================================
 # OCR GOOGLE VISION
