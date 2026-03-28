@@ -745,6 +745,17 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     if looks_like_role_or_label(raw):
         return False, "sembra_ruolo_o_label"
 
+    def validate_person_candidate(line: str) -> Tuple[bool, str]:
+    raw = normalize_spaces(line)
+    if not raw:
+        return False, "vuoto"
+
+    if looks_like_company_or_org(raw):
+        return False, "sembra_azienda"
+
+    if looks_like_role_or_label(raw):
+        return False, "sembra_ruolo_o_label"
+
     if not is_plausible_person_name_line(raw):
         return False, "non_plausibile"
 
