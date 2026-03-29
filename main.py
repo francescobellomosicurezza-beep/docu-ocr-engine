@@ -29,11 +29,11 @@ if creds_json:
 # APP
 # =========================================================
 
-app = FastAPI(title="Docu OCR Engine", version="5.2.0")
+app = FastAPI(title="Docu OCR Engine", version="6.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # restringere in produzione
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -155,7 +155,9 @@ INVALID_NAME_TOKENS = {
     "nato", "nata", "nato/a", "nata/a",
     "attestato", "corso", "data", "luogo", "n", "nr",
     "conferito", "rilasciato", "certifica", "attesta",
-    "ai", "sensi", "della", "del", "dei", "qualifica", "operaio"
+    "ai", "sensi", "della", "del", "dei",
+    "qualifica", "operaio", "rischio", "verifica", "apprendimento",
+    "test", "esito", "superamento", "azienda", "srl", "spa",
 }
 
 UPDATE_WORDS = [
@@ -551,7 +553,7 @@ def extract_birth_date(text: str) -> Optional[datetime]:
 
 
 # =========================================================
-# HELPERS NOME PERSONA
+# HELPERS NOME PERSONA - SUPER ENGINE
 # =========================================================
 
 def clean_person_line(line: str) -> str:
@@ -575,94 +577,6 @@ def is_valid_name_token(token: str) -> bool:
     return True
 
 
-def is_plausible_person_name_line(line: str) -> bool:
-    raw = clean_person_line(line)
-    if not raw:
-        return False
-
-    line_norm = normalize_line_for_matching(raw)
-
-    if len(raw) < 5 or len(raw) > 80:
-        return False
-    if re.search(r"\d{2,}", raw):
-        return False
-    if re.search(r"[<>{}\[\]|_=+/*\\]", raw):
-        return False
-
-    forbidden = [
-        "attestato",
-        "corso",
-        "nato",
-        "nata",
-        "durata",
-        "ore",
-        "data",
-        "responsabile",
-        "progetto",
-        "modalita",
-        "e-learning",
-        "elearning",
-        "regolamenti",
-        "tipologia",
-        "ai sensi",
-        "rilasciato",
-        "conferito",
-        "certifica",
-        "partecipazione",
-        "formazione",
-        "modulo",
-        "programma",
-        "giudizio",
-        "idoneita",
-        "sorveglianza",
-        "nomina",
-        "designazione",
-        "verbale",
-        "dpi",
-        "qualifica",
-        "settore di riferimento",
-        "codice ateco",
-        "qualifica",
-        "settore di riferimento",
-        "codice ateco",
-        "azienda",
-        "srl",
-        "spa",
-    ]
-    if any(tok in line_norm for tok in forbidden):
-        return False
-
-    words = [w for w in re.split(r"\s+", raw) if w]
-    if len(words) < 2 or len(words) > 5:
-        return False
-
-    valid_words = 0
-    for w in words:
-        clean = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ'’\-]", "", w)
-        if is_valid_name_token(clean):
-            valid_words += 1
-
-    return valid_words >= 2
-
-
-def split_name_line(line: str) -> Tuple[str, str]:
-    line = clean_person_line(line)
-    words = [w.strip(" ,.;:-") for w in line.split() if w.strip(" ,.;:-")]
-    words = [w for w in words if is_valid_name_token(w)]
-
-    if len(words) < 2:
-        return "", ""
-
-    nome = words[0].title()
-    cognome = " ".join(words[1:]).title()
-
-    if normalize_line_for_matching(nome) in INVALID_NAME_TOKENS:
-        return "", ""
-    if any(normalize_line_for_matching(x) in INVALID_NAME_TOKENS for x in cognome.split()):
-        return "", ""
-
-    return nome, cognome
-
 def looks_like_company_or_org(text: str) -> bool:
     s = normalize_line_for_matching(text)
 
@@ -678,11 +592,9 @@ def looks_like_company_or_org(text: str) -> bool:
     if any(tok in s for tok in blacklist_tokens):
         return True
 
-    # sigle o ragioni sociali piene di simboli
     if "&" in text:
         return True
 
-    # pattern tipo "XYZ SRL"
     if re.search(r"\b(srl|spa|snc|sas)\b", s):
         return True
 
@@ -726,12 +638,77 @@ def looks_like_role_or_label(text: str) -> bool:
         "test",
         "superamento",
         "esito",
+        "azienda",
+        "srl",
+        "spa",
     ]
 
     if any(tok in s for tok in bad_contains):
         return True
 
     return False
+
+
+def is_plausible_person_name_line(line: str) -> bool:
+    raw = clean_person_line(line)
+    if not raw:
+        return False
+
+    line_norm = normalize_line_for_matching(raw)
+
+    if len(raw) < 5 or len(raw) > 80:
+        return False
+    if re.search(r"\d{2,}", raw):
+        return False
+    if re.search(r"[<>{}\[\]|_=+/*\\]", raw):
+        return False
+    if looks_like_company_or_org(raw):
+        return False
+    if looks_like_role_or_label(raw):
+        return False
+
+    forbidden = [
+        "attestato", "corso", "nato", "nata", "durata", "ore", "data",
+        "responsabile", "progetto", "modalita", "e-learning", "elearning",
+        "regolamenti", "tipologia", "ai sensi", "rilasciato", "conferito",
+        "certifica", "partecipazione", "formazione", "modulo", "programma",
+        "giudizio", "idoneita", "sorveglianza", "nomina", "designazione",
+        "verbale", "dpi", "qualifica", "settore di riferimento",
+        "codice ateco", "verifica", "apprendimento", "test", "esito",
+    ]
+    if any(tok in line_norm for tok in forbidden):
+        return False
+
+    words = [w for w in re.split(r"\s+", raw) if w]
+    if len(words) < 2 or len(words) > 5:
+        return False
+
+    valid_words = 0
+    for w in words:
+        clean = re.sub(r"[^A-Za-zÀ-ÖØ-öø-ÿ'’\-]", "", w)
+        if is_valid_name_token(clean):
+            valid_words += 1
+
+    return valid_words >= 2
+
+
+def split_name_line(line: str) -> Tuple[str, str]:
+    line = clean_person_line(line)
+    words = [w.strip(" ,.;:-") for w in line.split() if w.strip(" ,.;:-")]
+    words = [w for w in words if is_valid_name_token(w)]
+
+    if len(words) < 2:
+        return "", ""
+
+    nome = words[0].title()
+    cognome = " ".join(words[1:]).title()
+
+    if normalize_line_for_matching(nome) in INVALID_NAME_TOKENS:
+        return "", ""
+    if any(normalize_line_for_matching(x) in INVALID_NAME_TOKENS for x in cognome.split()):
+        return "", ""
+
+    return nome, cognome
 
 
 def validate_person_candidate(line: str) -> Tuple[bool, str]:
@@ -752,9 +729,8 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     if not nome or not cognome:
         return False, "split_non_valido"
 
-    # evita robe tipo "Con", "Il", ecc.
     if len(nome) <= 2 or len(cognome) <= 2:
-        return False, "troppo corto"
+        return False, "troppo_corto"
 
     full = f"{nome} {cognome}".strip()
     if looks_like_company_or_org(full):
@@ -763,75 +739,129 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     return True, "ok"
 
 
+def score_name_candidate(line: str, idx: int) -> Tuple[int, List[str]]:
+    reasons = []
+    score = 0
+    raw = clean_person_line(line)
+
+    if raw.isupper():
+        score += 3
+        reasons.append("uppercase")
+
+    words = raw.split()
+    if 2 <= len(words) <= 4:
+        score += 2
+        reasons.append("word_count_ok")
+
+    if idx < 12:
+        score += 2
+        reasons.append("top_of_document")
+
+    if not looks_like_company_or_org(raw):
+        score += 2
+        reasons.append("not_company")
+
+    if not looks_like_role_or_label(raw):
+        score += 2
+        reasons.append("not_role_label")
+
+    if re.search(r"\d", raw):
+        score -= 4
+        reasons.append("contains_digits")
+
+    return score, reasons
+
+
 def extract_name_after_anchor(clean_text: str) -> Tuple[str, str, str]:
     anchor_pattern = "|".join(re.escape(a) for a in NAME_ANCHORS)
 
+    # caso 1: nome sulla stessa riga
     m = re.search(
         rf"(?:{anchor_pattern})\s*[:\-]?\s*([A-Za-zÀ-ÖØ-öø-ÿ'’\-\s&\.]{{5,140}})",
         clean_text,
         re.IGNORECASE,
     )
-    if not m:
-        return "", "", ""
+    if m:
+        raw = normalize_spaces(m.group(1))
+        raw = re.split(
+            r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica|settore di riferimento|codice ateco)\b",
+            raw,
+            flags=re.IGNORECASE,
+        )[0].strip(" ,.;:-")
 
-    raw = normalize_spaces(m.group(1))
+        ok, _ = validate_person_candidate(raw)
+        if ok:
+            nome, cognome = split_name_line(raw)
+            if nome and cognome:
+                return nome, cognome, "anchor_regex_same_line"
 
-    raw = re.split(
-        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica|settore di riferimento|codice ateco)\b",
-        raw,
-        flags=re.IGNORECASE,
-    )[0].strip(" ,.;:-")
-
-    ok, _ = validate_person_candidate(raw)
-
-    if ok:
-        nome, cognome = split_name_line(raw)
-        if nome and cognome:
-            return nome, cognome, "anchor_regex"
-
-    return "", "", ""
-
-    raw = normalize_spaces(m.group(1))
-    raw = re.split(
-        r"\b(nato a|nata a|nato\/a a|nato il|nata il|data di nascita|qualifica|mansione|il corso|data di conclusione|data di svolgimento|attestato emesso|data emissione|giudizio|idoneita|idoneità|con la seguente qualifica|settore di riferimento|codice ateco)\b",
-        raw,
-        flags=re.IGNORECASE,
-    )[0].strip(" ,.;:-")
-
-    ok, _ = validate_person_candidate(raw)
-    if ok:
-        nome, cognome = split_name_line(raw)
-        if nome and cognome:
-            return nome, cognome, "anchor_regex"
+    # caso 2: nome nelle righe subito sotto anchor
+    lines = [l.strip() for l in normalize_spaces(clean_text).splitlines() if l.strip()]
+    for i, line in enumerate(lines):
+        line_norm = normalize_line_for_matching(line)
+        if any(anchor in line_norm for anchor in NAME_ANCHORS):
+            for cand in lines[i + 1:i + 5]:
+                ok, _ = validate_person_candidate(cand)
+                if ok:
+                    nome, cognome = split_name_line(cand)
+                    if nome and cognome:
+                        return nome, cognome, "anchor_lines_below"
 
     return "", "", ""
+
+
+def extract_name_ai_style(text: str) -> Tuple[str, str, List[str]]:
+    debug = []
+    lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
+
+    candidates: List[Dict[str, Any]] = []
+
+    for idx, line in enumerate(lines[:30]):
+        raw = clean_person_line(line)
+        if len(raw) < 5 or len(raw) > 80:
+            continue
+
+        ok, reason = validate_person_candidate(raw)
+        if not ok:
+            debug.append(f"candidato scartato ai_style [{idx}]: {reason} -> {raw}")
+            continue
+
+        nome, cognome = split_name_line(raw)
+        if not nome or not cognome:
+            debug.append(f"candidato scartato ai_style [{idx}]: split_vuoto -> {raw}")
+            continue
+
+        score, reasons = score_name_candidate(raw, idx)
+        candidates.append({
+            "line": raw,
+            "idx": idx,
+            "score": score,
+            "reasons": reasons,
+            "nome": nome,
+            "cognome": cognome,
+        })
+
+    if not candidates:
+        return "", "", debug
+
+    candidates.sort(key=lambda x: (x["score"], -x["idx"]), reverse=True)
+    best = candidates[0]
+    debug.append(f"best_candidate_ai_style: {best['line']} score={best['score']} reasons={','.join(best['reasons'])}")
+    return best["nome"], best["cognome"], debug
+
 
 def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
-    debug = []
+    debug: List[str] = []
     clean_text = normalize_spaces(text)
     lines = [l.strip() for l in clean_text.splitlines() if l.strip()]
 
-    # 1. priorità assoluta: regex dopo anchor
+    # 1. priorità assoluta: anchor
     nome, cognome, src = extract_name_after_anchor(clean_text)
     if nome and cognome:
         debug.append(f"nome trovato con priorità alta: {src}")
         return nome, cognome, debug
 
-    # 2. riga immediatamente dopo anchor
-    for i, line in enumerate(lines):
-        line_norm = normalize_line_for_matching(line)
-        if any(anchor in line_norm for anchor in NAME_ANCHORS):
-            for cand in lines[i + 1:i + 5]:
-                ok, reason = validate_person_candidate(cand)
-                if ok:
-                    nome, cognome = split_name_line(cand)
-                    if nome and cognome:
-                        debug.append("nome trovato nelle righe successive ad anchor")
-                        return nome, cognome, debug
-                else:
-                    debug.append(f"candidato scartato dopo anchor: {reason}")
-
-    # 3. fallback prima di riga con nato/nata
+    # 2. prima di nato/nata
     for i, line in enumerate(lines):
         if re.search(r"\bnato\b|\bnata\b|\bnato\/a\b", line, re.IGNORECASE):
             prev_candidates = list(reversed(lines[max(0, i - 3):i]))
@@ -845,30 +875,16 @@ def extract_name_generic(text: str) -> Tuple[str, str, List[str]]:
                 else:
                     debug.append(f"candidato scartato prima di nato/nata: {reason}")
 
-    # 4. fallback ULTRA RESTRITTIVO (solo nomi forti)
-for cand in lines[:20]:
-    ok, reason = validate_person_candidate(cand)
-
-    if not ok:
-        debug.append(f"candidato scartato con fallback: {reason}")
-        continue
-
-    # 🔥 NUOVA REGOLA: deve essere tutto maiuscolo (tipico attestati)
-    if not cand.isupper():
-        debug.append("candidato scartato: non tutto maiuscolo")
-        continue
-
-    # 🔥 almeno 2 parole vere
-    parts = cand.split()
-    if len(parts) < 2:
-        debug.append("candidato scartato: meno di 2 parole")
-        continue
-
-    nome, cognome = split_name_line(cand)
-
+    # 3. fallback layout/AI-style
+    nome, cognome, dbg = extract_name_ai_style(clean_text)
+    debug.extend(dbg)
     if nome and cognome:
-        debug.append("nome trovato con fallback STRONG (uppercase)")
+        debug.append("nome trovato con fallback ai_style")
         return nome, cognome, debug
+
+    debug.append("nome non trovato")
+    return "", "", debug
+
 
 # =========================================================
 # OCR GOOGLE VISION
@@ -1046,7 +1062,6 @@ def split_text_zones(text: str) -> Dict[str, str]:
 def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
     zones = split_text_zones(text)
-
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
 
     scores = {
@@ -1057,14 +1072,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         "documenti_aziendali": 0,
     }
 
-    debug = {
-        "positive_hits": [],
-        "negative_hits": [],
-    }
+    debug = {"positive_hits": [], "negative_hits": []}
 
-    # ---------------------
     # ATTESTATI
-    # ---------------------
     if "attestato" in title_blob:
         scores["attestati"] += 8
         debug["positive_hits"].append("attestati:+8 titolo contiene attestato")
@@ -1087,9 +1097,7 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["attestati"] += 2
         debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
 
-    # ---------------------
     # NOMINE
-    # ---------------------
     if "nomina" in title_blob:
         scores["nomine"] += 8
         debug["positive_hits"].append("nomine:+8 titolo contiene nomina")
@@ -1112,9 +1120,7 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         elif has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
-    # ---------------------
-    # VISITE MEDICHE
-    # ---------------------
+    # VISITE
     if "giudizio di idoneita" in title_blob or "giudizio di idoneità" in title_blob:
         scores["visite_mediche"] += 8
         debug["positive_hits"].append("visite:+8 giudizio nel titolo")
@@ -1131,11 +1137,8 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "idoneo" in blob or "idonea" in blob:
         scores["visite_mediche"] += 2
 
-    # ---------------------
-    # VERBALI DPI
-    # ---------------------
+    # DPI
     dpi_score = 0
-
     if "verbale di consegna" in title_blob:
         dpi_score += 8
         debug["positive_hits"].append("dpi:+8 verbale di consegna nel titolo")
@@ -1155,17 +1158,13 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         dpi_score += 5
     if "dispositivi di protezione individuale" in title_blob:
         dpi_score += 5
-
     if re.search(r"\bdpi\b", title_blob):
         dpi_score += 2
 
     scores["verbali_dpi"] = dpi_score
 
-    # ---------------------
     # DOCUMENTI AZIENDALI
-    # ---------------------
     doc_score = 0
-
     if re.search(r"\bdvr\b", title_blob):
         doc_score += 9
         debug["positive_hits"].append("doc_az:+9 DVR nel titolo")
@@ -1188,18 +1187,14 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 
     if "organigramma" in title_blob:
         doc_score += 7
-
     if "procedura" in title_blob:
         doc_score += 6
-
     if "protocollo" in title_blob:
         doc_score += 5
 
     scores["documenti_aziendali"] = doc_score
 
-    # ---------------------
-    # PENALITÀ INCROCIATE
-    # ---------------------
+    # penalità
     for neg in ATTESTATO_NEGATIVE_SIGNALS:
         if neg in blob:
             scores["attestati"] -= 2
@@ -1917,6 +1912,7 @@ def parse_documento_generico(text: str, filename: str, categoria_label: str) -> 
         "corso": "",
         "famiglia_corso": "",
         "tipo_percorso": "",
+        "modulo_formazione_lavoratori": "",
         "data_conclusione": "",
         "data_scadenza": "",
         "prossimo_aggiornamento": "",
@@ -2062,7 +2058,7 @@ def apply_category_override(item: Dict[str, Any], forced_category: Optional[str]
 def build_report_attestati(items: List[Dict[str, Any]]) -> str:
     lines = []
     lines.append("REPORT ATTESTATI")
-    lines.append("=" * 160)
+    lines.append("=" * 180)
     lines.append("")
 
     header = " | ".join([
@@ -2081,7 +2077,7 @@ def build_report_attestati(items: List[Dict[str, Any]]) -> str:
         "EXTRACTION_METHOD",
     ])
     lines.append(header)
-    lines.append("-" * 160)
+    lines.append("-" * 180)
 
     for item in items:
         label = item.get("scadenza_label", "data_scadenza")
@@ -2180,7 +2176,7 @@ def home():
     return {
         "status": "ok",
         "message": "Docu OCR Engine online",
-        "version": "5.2.0"
+        "version": "6.0.0"
     }
 
 
