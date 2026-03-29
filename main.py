@@ -722,6 +722,16 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     if not raw:
         return False, "vuoto"
 
+    # 🔥 FIX 1: SE È TUTTO MAIUSCOLO → PRIORITÀ ALTA (TIPICO ATTESTATI)
+    if raw.isupper():
+        words = raw.split()
+
+        # deve essere tipo "NOME COGNOME"
+        if 2 <= len(words) <= 4:
+            # niente numeri
+            if not re.search(r"\d", raw):
+                return True, "ok_uppercase"
+
     if looks_like_company_or_org(raw):
         return False, "sembra_azienda"
 
@@ -735,15 +745,15 @@ def validate_person_candidate(line: str) -> Tuple[bool, str]:
     if not nome or not cognome:
         return False, "split_non_valido"
 
-    if len(nome) <= 2 or len(cognome) <= 2:
-        return False, "troppo_corto"
+    # 🔥 FIX 2: NON bloccare cognomi lunghi (tipo "Anna Lisa")
+    if len(nome) <= 1 or len(cognome) <= 1:
+        return False, "troppo corto"
 
     full = f"{nome} {cognome}".strip()
     if looks_like_company_or_org(full):
         return False, "split_sembra_azienda"
 
     return True, "ok"
-
 
 def score_name_candidate(line: str, idx: int) -> Tuple[int, List[str]]:
     reasons = []
