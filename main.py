@@ -648,7 +648,6 @@ def looks_like_role_or_label(text: str) -> bool:
 
     return False
 
-
 def is_plausible_person_name_line(line: str) -> bool:
     raw = clean_person_line(line)
     if not raw:
@@ -656,30 +655,37 @@ def is_plausible_person_name_line(line: str) -> bool:
 
     line_norm = normalize_line_for_matching(raw)
 
-    if len(raw) < 5 or len(raw) > 80:
+    # 🔥 FIX 1: accetta uppercase (tipico attestati)
+    if raw.isupper():
+        words = raw.split()
+        if 2 <= len(words) <= 4:
+            return True
+
+    if len(raw) < 4 or len(raw) > 80:
         return False
+
     if re.search(r"\d{2,}", raw):
         return False
+
     if re.search(r"[<>{}\[\]|_=+/*\\]", raw):
-        return False
-    if looks_like_company_or_org(raw):
-        return False
-    if looks_like_role_or_label(raw):
         return False
 
     forbidden = [
-        "attestato", "corso", "nato", "nata", "durata", "ore", "data",
-        "responsabile", "progetto", "modalita", "e-learning", "elearning",
-        "regolamenti", "tipologia", "ai sensi", "rilasciato", "conferito",
-        "certifica", "partecipazione", "formazione", "modulo", "programma",
-        "giudizio", "idoneita", "sorveglianza", "nomina", "designazione",
-        "verbale", "dpi", "qualifica", "settore di riferimento",
-        "codice ateco", "verifica", "apprendimento", "test", "esito",
+        "attestato", "corso", "durata", "ore",
+        "data", "responsabile", "progetto",
+        "modalita", "e-learning", "regolamenti",
+        "tipologia", "ai sensi", "rilasciato",
+        "conferito", "certifica", "formazione",
+        "modulo", "programma", "giudizio",
+        "idoneita", "nomina", "designazione",
+        "verbale", "dpi", "azienda", "srl", "spa",
     ]
+
     if any(tok in line_norm for tok in forbidden):
         return False
 
     words = [w for w in re.split(r"\s+", raw) if w]
+
     if len(words) < 2 or len(words) > 5:
         return False
 
