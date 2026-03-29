@@ -953,8 +953,18 @@ def ocr_pdf_pages(content: bytes) -> Tuple[str, int]:
         if page_text:
             texts.append(page_text)
     return normalize_spaces("\n\n".join(texts)), len(page_images)
+def ocr_pdf_pages_separately(content: bytes) -> List[str]:
+    page_images = pdf_to_page_images(content)
+    texts = []
 
+    for img_bytes in page_images:
+        try:
+            page_text = ocr_image_bytes(img_bytes)
+            texts.append(remove_noise_lines(normalize_spaces(page_text)))
+        except Exception:
+            texts.append("")
 
+    return texts
 # =========================================================
 # ESTRAZIONE TESTO FILE
 # =========================================================
@@ -1061,6 +1071,7 @@ def extract_text_from_file(filename: str, content: bytes, content_type: str) -> 
         result["extraction_method"] = "extraction_failed"
         result["extraction_error"] = str(e)
         return result
+
 def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str) -> Dict[str, Any]:
     ext = os.path.splitext(filename.lower())[1]
     is_pdf = content_type == "application/pdf" or ext == ".pdf"
@@ -1076,7 +1087,14 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     if not is_pdf:
         return result
 
+    # 1. provo testo nativo per pagina
     pages_text = extract_pdf_text_by_page(content)
+
+    # 2. se insufficiente, passo a OCR per pagina
+    usable_pages = [p for p in pages_text if p and len(p.strip()) >= 20]
+    if not usable_pages:
+        pages_text = ocr_pdf_pages_separately(content)
+
     if not pages_text:
         return result
 
@@ -2021,6 +2039,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
     text = extraction["text"]
     category, scores, category_meta = score_category(text, filename)
     mixed_info = detect_mixed_pdf_categories(filename, content, content_type)
+    category, scores, category_meta = score_category(text, filename)
     result = {
         "filename": filename,
         "content_type": content_type,
@@ -2075,6 +2094,21 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         result["cartella"] = FOLDERS["altri_da_verificare"]
         result["needs_review"] = True
         result["confidenza"] = "bassa"
+
+        if "documento_composto_multi_categoria" not in result["review_reasons"]:
+            result["review_reasons"].append("documento_composto_multi_categoria")
+
+        result["parser_debug"] = mixed_info.get("debug", [])
+        return result
+        # FIX: PDF composto multi-categoria
+    if mixed_info.get("is_mixed"):
+        result["categoria"] = "altri_da_verificare"
+        result["categoria_label"] = "Da verificare"
+        result["cartella"] = FOLDERS["altri_da_verificare"]
+        result["needs_review"] = True
+        result["confidenza"] = "bassa"
+        result["page_categories"] = mixed_info.get("page_categories", [])
+        result["mixed_document"] = True
 
         if "documento_composto_multi_categoria" not in result["review_reasons"]:
             result["review_reasons"].append("documento_composto_multi_categoria")
