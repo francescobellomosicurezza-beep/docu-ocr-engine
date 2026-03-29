@@ -2074,7 +2074,45 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         "mixed_document": mixed_info.get("is_mixed", False),
         "parser_debug": [],
     }
+    # =====================================================
+    # BLOCCO IMMEDIATO PDF COMPOSTI (PRIMA DI QUALSIASI PARSER)
+    # =====================================================
+    mixed_info = detect_mixed_pdf_categories(filename, content, content_type)
 
+    if mixed_info.get("is_mixed"):
+        return {
+            "filename": filename,
+            "content_type": content_type,
+            "size_bytes": len(content),
+            "testo_estratto": text[:3000],
+            "categoria": "altri_da_verificare",
+            "categoria_label": "Da verificare",
+            "cartella": FOLDERS["altri_da_verificare"],
+            "nome": "",
+            "cognome": "",
+            "corso": "",
+            "famiglia_corso": "",
+            "tipo_percorso": "",
+            "data_conclusione": "",
+            "data_scadenza": "",
+            "prossimo_aggiornamento": "",
+            "scadenza_label": "",
+            "confidenza": "bassa",
+            "needs_review": True,
+            "review_reasons": ["documento_composto_multi_categoria"],
+            "score_details": scores,
+            "score_meta": category_meta,
+            "suggested_filename": safe_filename(filename),
+            "extraction_method": extraction["extraction_method"],
+            "ocr_used": extraction["ocr_used"],
+            "ocr_pages": extraction["ocr_pages"],
+            "ocr_soft_limit": extraction["ocr_soft_limit"],
+            "ocr_alert": extraction["ocr_alert"],
+            "extraction_error": extraction.get("extraction_error", ""),
+            "parser_debug": mixed_info.get("debug", []),
+            "page_categories": mixed_info.get("page_categories", []),
+            "mixed_document": True,
+        }
     if extraction["extraction_method"] == "extraction_failed":
         result["categoria"] = "altri_da_verificare"
         result["categoria_label"] = "Da verificare"
