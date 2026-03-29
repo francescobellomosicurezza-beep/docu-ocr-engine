@@ -979,7 +979,28 @@ def extract_pdf_text(content: bytes) -> str:
             pass
 
     return normalize_spaces(text)
+def extract_pdf_text_by_page(content: bytes) -> List[str]:
+    pages_text = []
 
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
+
+    try:
+        doc = fitz.open(tmp_path)
+        for page in doc:
+            txt = page.get_text() or ""
+            pages_text.append(remove_noise_lines(normalize_spaces(txt)))
+        doc.close()
+    except Exception:
+        pages_text = []
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except Exception:
+            pass
+
+    return pages_text
 
 def extract_text_from_file(filename: str, content: bytes, content_type: str) -> Dict[str, Any]:
     ext = os.path.splitext(filename.lower())[1]
@@ -1040,7 +1061,57 @@ def extract_text_from_file(filename: str, content: bytes, content_type: str) -> 
         result["extraction_method"] = "extraction_failed"
         result["extraction_error"] = str(e)
         return result
+def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str) -> Dict[str, Any]:
+    ext = os.path.splitext(filename.lower())[1]
+    is_pdf = content_type == "application/pdf" or ext == ".pdf"
 
+    result = {
+        "is_mixed": False,
+        "page_categories": [],
+        "dominant_category": None,
+        "distinct_categories": [],
+        "debug": [],
+    }
+
+    if not is_pdf:
+        return result
+
+    pages_text = extract_pdf_text_by_page(content)
+    if not pages_text:
+        return result
+
+    page_categories = []
+    debug_rows = []
+
+    for idx, page_text in enumerate(pages_text, start=1):
+        if not page_text or len(page_text.strip()) < 20:
+            page_categories.append("vuota")
+            debug_rows.append(f"p{idx}=vuota")
+            continue
+
+        cat, scores, meta = score_category(page_text, f"{filename}#page_{idx}")
+        page_categories.append(cat)
+        debug_rows.append(f"p{idx}={cat}")
+
+    meaningful = [c for c in page_categories if c not in {"vuota", "altri_da_verificare"}]
+    distinct = sorted(list(set(meaningful)))
+
+    dominant = None
+    if meaningful:
+        counts = {}
+        for c in meaningful:
+            counts[c] = counts.get(c, 0) + 1
+        dominant = max(counts, key=counts.get)
+
+    result["page_categories"] = page_categories
+    result["dominant_category"] = dominant
+    result["distinct_categories"] = distinct
+    result["debug"] = debug_rows
+
+    if len(distinct) >= 2:
+        result["is_mixed"] = True
+
+    return result
 
 # =========================================================
 # ZONE TESTO
@@ -1949,7 +2020,7 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
     extraction = extract_text_from_file(filename, content, content_type)
     text = extraction["text"]
     category, scores, category_meta = score_category(text, filename)
-
+    mixed_info = detect_mixed_pdf_categories(filename, content, content_type)
     result = {
         "filename": filename,
         "content_type": content_type,
@@ -1980,6 +2051,8 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         "ocr_soft_limit": extraction["ocr_soft_limit"],
         "ocr_alert": extraction["ocr_alert"],
         "extraction_error": extraction.get("extraction_error", ""),
+        "page_categories": mixed_info.get("page_categories", []),
+        "mixed_document": mixed_info.get("is_mixed", False),
         "parser_debug": [],
     }
 
@@ -1992,7 +2065,22 @@ def analyze_document(filename: str, content: bytes, content_type: str) -> Dict[s
         result["confidenza"] = "bassa"
         result["parser_debug"] = ["estrazione testo fallita"]
         return result
+    # =====================================================
+    # FIX PDF COMPOSTI: se il PDF contiene categorie diverse
+    # non trattarlo come singolo attestato pulito
+    # =====================================================
+    if mixed_info.get("is_mixed"):
+        result["categoria"] = "altri_da_verificare"
+        result["categoria_label"] = "Da verificare"
+        result["cartella"] = FOLDERS["altri_da_verificare"]
+        result["needs_review"] = True
+        result["confidenza"] = "bassa"
 
+        if "documento_composto_multi_categoria" not in result["review_reasons"]:
+            result["review_reasons"].append("documento_composto_multi_categoria")
+
+        result["parser_debug"] = mixed_info.get("debug", [])
+        return result
     if category == "attestati":
         parsed = parse_attestato(text, filename)
         result.update(parsed)
