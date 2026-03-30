@@ -1126,54 +1126,85 @@ def split_text_zones(text: str) -> Dict[str, str]:
 def detect_nomina_strong(text: str, filename: str = "") -> bool:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
 
-    strong_patterns = [
+    strong_nomina_phrases = [
+        "lettera di nomina",
         "nomina",
         "designazione",
-        "lettera di nomina",
-        "nomina a",
-        "si nomina",
         "viene nominato",
         "viene designato",
-        "designato quale",
+        "si nomina",
+        "si designa",
+        "incaricato di",
+        "addetto al",
+        "addetto alla",
+        "nomina ad addetto",
+        "designazione ad addetto",
     ]
 
-    role_patterns = [
+    role_phrases = [
         "primo soccorso",
         "antincendio",
         "preposto",
         "rspp",
+        "r.l.s",
         "rls",
+        "rappresentante dei lavoratori per la sicurezza",
+        "responsabile del servizio di prevenzione e protezione",
     ]
 
-    has_strong = any(p in blob for p in strong_patterns)
-    has_role = any(r in blob for r in role_patterns)
+    neg_attestato_phrases = [
+        "attestato di frequenza",
+        "attestato di formazione",
+        "attestato di partecipazione",
+        "verifica dell'apprendimento",
+        "ha frequentato",
+        "ha partecipato",
+        "programma del corso",
+    ]
 
-    return has_strong and has_role
+    strong_hits = sum(1 for p in strong_nomina_phrases if p in blob)
+    role_hits = sum(1 for p in role_phrases if p in blob)
+    attestato_hits = sum(1 for p in neg_attestato_phrases if p in blob)
+
+    # Nomina forte se:
+    # - ha almeno 1 frase forte di nomina + almeno 1 ruolo
+    # - e NON ha chiari segnali da attestato
+    if strong_hits >= 1 and role_hits >= 1 and attestato_hits == 0:
+        return True
+
+    # fallback OCR: se ha almeno 2 indicatori forti da nomina e 1 ruolo, considerala nomina
+    if strong_hits >= 2 and role_hits >= 1:
+        return True
+
+    return False
 
 
 def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[str, Any]]:
-    # priorità assoluta nomine
+    blob = normalize_text_for_matching(f"{filename}\n{text}")
+    zones = split_text_zones(text)
+    title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
+    identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
+
+    # BLOCCO PRIORITARIO NOMINE
     if detect_nomina_strong(text, filename):
         scores = {
             "attestati": 0,
-            "nomine": 10,
+            "nomine": 12,
             "visite_mediche": 0,
             "verbali_dpi": 0,
             "documenti_aziendali": 0,
         }
         meta = {
             "best_category": "nomine",
-            "best_score": 10,
+            "best_score": 12,
             "second_category": "attestati",
             "second_score": 0,
-            "delta": 10,
-            "classification_debug": {"forced": "nomina_strong_detection"},
+            "delta": 12,
+            "classification_debug": {
+                "forced": "nomina_strong_detection"
+            },
         }
         return "nomine", scores, meta
-
-    blob = normalize_text_for_matching(f"{filename}\n{text}")
-    zones = split_text_zones(text)
-    title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
 
     scores = {
         "attestati": 0,
@@ -1183,9 +1214,14 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         "documenti_aziendali": 0,
     }
 
-    debug = {"positive_hits": [], "negative_hits": []}
+    debug = {
+        "positive_hits": [],
+        "negative_hits": [],
+    }
 
+    # =====================================================
     # ATTESTATI
+    # =====================================================
     if "attestato" in title_blob:
         scores["attestati"] += 8
         debug["positive_hits"].append("attestati:+8 titolo contiene attestato")
@@ -1208,7 +1244,9 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["attestati"] += 2
         debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
 
+    # =====================================================
     # NOMINE
+    # =====================================================
     if "nomina" in title_blob:
         scores["nomine"] += 8
         debug["positive_hits"].append("nomine:+8 titolo contiene nomina")
@@ -1217,21 +1255,29 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         debug["positive_hits"].append("nomine:+4 testo contiene nomina")
 
     if "designazione" in title_blob:
-        scores["nomine"] += 5
-        debug["positive_hits"].append("nomine:+5 designazione nel titolo")
+        scores["nomine"] += 6
+        debug["positive_hits"].append("nomine:+6 designazione nel titolo")
     elif "designazione" in blob:
-        scores["nomine"] += 2
+        scores["nomine"] += 3
 
     if "lettera di nomina" in blob:
+        scores["nomine"] += 5
+
+    if "viene nominato" in blob or "viene designato" in blob or "si nomina" in blob:
         scores["nomine"] += 4
+        debug["positive_hits"].append("nomine:+4 formula tipica nomina")
 
     for _, kws in NOMINA_ROLE_KEYWORDS.items():
         if has_any_keyword(title_blob, kws):
+            scores["nomine"] += 3
+        elif has_any_keyword(identity_blob, kws):
             scores["nomine"] += 2
         elif has_any_keyword(blob, kws):
             scores["nomine"] += 1
 
-    # VISITE
+    # =====================================================
+    # VISITE MEDICHE
+    # =====================================================
     if "giudizio di idoneita" in title_blob or "giudizio di idoneità" in title_blob:
         scores["visite_mediche"] += 8
         debug["positive_hits"].append("visite:+8 giudizio nel titolo")
@@ -1248,8 +1294,11 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "idoneo" in blob or "idonea" in blob:
         scores["visite_mediche"] += 2
 
-    # DPI
+    # =====================================================
+    # VERBALI DPI
+    # =====================================================
     dpi_score = 0
+
     if "verbale di consegna" in title_blob:
         dpi_score += 8
         debug["positive_hits"].append("dpi:+8 verbale di consegna nel titolo")
@@ -1274,8 +1323,11 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 
     scores["verbali_dpi"] = dpi_score
 
+    # =====================================================
     # DOCUMENTI AZIENDALI
+    # =====================================================
     doc_score = 0
+
     if re.search(r"\bdvr\b", title_blob):
         doc_score += 9
         debug["positive_hits"].append("doc_az:+9 DVR nel titolo")
@@ -1305,16 +1357,18 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 
     scores["documenti_aziendali"] = doc_score
 
-    # penalità incrociate
+    # =====================================================
+    # PENALITÀ INCROCIATE
+    # =====================================================
     for neg in ATTESTATO_NEGATIVE_SIGNALS:
         if neg in blob:
             scores["attestati"] -= 2
             debug["negative_hits"].append(f"attestati:-2 presenza '{neg}'")
 
-    # se c'è nomina/designazione, abbassa forte attestati
-    if "nomina" in blob or "designazione" in blob:
-        scores["attestati"] -= 5
-        debug["negative_hits"].append("attestati:-5 testo da nomina/designazione")
+    # Se compaiono parole forti da nomina, abbassa molto attestati
+    if "nomina" in blob or "designazione" in blob or "viene nominato" in blob or "viene designato" in blob:
+        scores["attestati"] -= 6
+        debug["negative_hits"].append("attestati:-6 segnali forti da nomina")
 
     if "attestato" in title_blob:
         scores["verbali_dpi"] = max(0, scores["verbali_dpi"] - 4)
@@ -1350,6 +1404,7 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     return best_category, scores, meta
 
 
+
 # =========================================================
 # DETECTION CORSO ATTESTATI
 # =========================================================
@@ -1378,10 +1433,16 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "CORSO_NON_RICONOSCIUTO": 0,
     }
 
+    # Se è testo da nomina, non provare nemmeno a inferire corsi
+    if detect_nomina_strong(zones.get("full_text", ""), filename):
+        debug.append("blocco parser corsi: testo riconosciuto come nomina")
+        return "CORSO_NON_RICONOSCIUTO", "base", "", scores, debug
+
     is_update = any(w in title_blob for w in UPDATE_WORDS) or (
         "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
     )
 
+    # famiglie specifiche: conta quasi solo titolo e poco identity, corpo quasi zero
     for family in [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
@@ -1398,36 +1459,45 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         title_hits = count_keywords(title_blob, kws)
         identity_hits = count_keywords(identity_blob, kws)
         body_hits_raw = count_keywords(body_blob, kws)
-        body_hits = int(body_hits_raw * 0.3)  # corpo pesa pochissimo, evita falsi corsi su nomine
 
-        scores[family] += title_hits * 6
-        scores[family] += identity_hits * 3
+        # il corpo pesa pochissimo perché l'OCR sporco genera falsi positivi
+        body_hits = 1 if body_hits_raw >= 3 else 0
+
+        scores[family] += title_hits * 8
+        scores[family] += identity_hits * 2
         scores[family] += body_hits
 
         if title_hits:
-            debug.append(f"{family}: +{title_hits * 6} match titolo")
+            debug.append(f"{family}: +{title_hits * 8} match titolo")
         if identity_hits:
-            debug.append(f"{family}: +{identity_hits * 3} match zona nominativo")
+            debug.append(f"{family}: +{identity_hits * 2} match zona nominativo")
         if body_hits:
             debug.append(f"{family}: +{body_hits} match corpo")
 
+    # FORMAZIONE LAVORATORI scatta solo se ci sono segnali chiari nel titolo/testa
     fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
-    fg_body = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
     fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
-    fs_body = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
     fl_title = count_keywords(title_blob, GENERIC_WORKER_TRAINING_PATTERNS)
-    fl_body = count_keywords(full_blob, GENERIC_WORKER_TRAINING_PATTERNS)
 
-    scores["FORMAZIONE_GENERALE"] += fg_title * 6 + fg_body * 1
-    scores["FORMAZIONE_SPECIFICA"] += fs_title * 6 + fs_body * 1
-    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 7 + fl_body * 2
+    fg_full = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
+    fs_full = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
+    fl_full = count_keywords(full_blob, GENERIC_WORKER_TRAINING_PATTERNS)
+
+    scores["FORMAZIONE_GENERALE"] += fg_title * 8
+    scores["FORMAZIONE_SPECIFICA"] += fs_title * 8
+    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 8
+
+    # il full text aiuta poco, non deve dominare
+    scores["FORMAZIONE_GENERALE"] += fg_full * 1
+    scores["FORMAZIONE_SPECIFICA"] += fs_full * 1
+    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_full * 1
 
     if fg_title:
-        debug.append(f"FORMAZIONE_GENERALE: +{fg_title * 6} match titolo")
+        debug.append(f"FORMAZIONE_GENERALE: +{fg_title * 8} match titolo")
     if fs_title:
-        debug.append(f"FORMAZIONE_SPECIFICA: +{fs_title * 6} match titolo")
+        debug.append(f"FORMAZIONE_SPECIFICA: +{fs_title * 8} match titolo")
     if fl_title:
-        debug.append(f"AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +{fl_title * 7} match titolo")
+        debug.append(f"AGGIORNAMENTO_FORMAZIONE_LAVORATORI: +{fl_title * 8} match titolo")
 
     if "formazione generale" in title_blob:
         scores["FORMAZIONE_GENERALE"] += 4
@@ -1438,30 +1508,23 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         debug.append("FORMAZIONE_SPECIFICA: +4 boost titolo esplicito")
 
     if "rischio alto" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 4
+        debug.append("FORMAZIONE_SPECIFICA: +4 rischio alto nel titolo")
+    elif "rischio medio" in title_blob:
         scores["FORMAZIONE_SPECIFICA"] += 3
-        debug.append("FORMAZIONE_SPECIFICA: +3 rischio alto nel titolo")
-    if "rischio medio" in title_blob:
-        scores["FORMAZIONE_SPECIFICA"] += 2
-        debug.append("FORMAZIONE_SPECIFICA: +2 rischio medio nel titolo")
-    if "rischio basso" in title_blob:
-        scores["FORMAZIONE_SPECIFICA"] += 2
-        debug.append("FORMAZIONE_SPECIFICA: +2 rischio basso nel titolo")
+        debug.append("FORMAZIONE_SPECIFICA: +3 rischio medio nel titolo")
+    elif "rischio basso" in title_blob:
+        scores["FORMAZIONE_SPECIFICA"] += 3
+        debug.append("FORMAZIONE_SPECIFICA: +3 rischio basso nel titolo")
 
-    if "rischio alto" in full_blob and "formazione specifica" in full_blob:
-        scores["FORMAZIONE_SPECIFICA"] += 2
-        debug.append("FORMAZIONE_SPECIFICA: +2 rischio alto nel testo")
-    if "rischio medio" in full_blob and "formazione specifica" in full_blob:
-        scores["FORMAZIONE_SPECIFICA"] += 1
-        debug.append("FORMAZIONE_SPECIFICA: +1 rischio medio nel testo")
-    if "rischio basso" in full_blob and "formazione specifica" in full_blob:
-        scores["FORMAZIONE_SPECIFICA"] += 1
-        debug.append("FORMAZIONE_SPECIFICA: +1 rischio basso nel testo")
-
-    if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= 8:
-        for family in ["PRIMO_SOCCORSO", "ANTINCENDIO", "PREPOSTO"]:
-            if scores[family] > 0 and count_keywords(title_blob, SPECIFIC_COURSE_KEYWORDS[family]) == 0:
-                scores[family] -= 3
-                debug.append(f"{family}: -3 penalità match solo nel corpo contro titolo lavoratori")
+    # unificazione formazione lavoratori SOLO se il titolo parla davvero di formazione lavoratori
+    has_worker_training_title = (
+        fl_title > 0
+        or fg_title > 0
+        or fs_title > 0
+        or "formazione lavoratori" in title_blob
+        or "formazione dei lavoratori" in title_blob
+    )
 
     fl_score = (
         scores["FORMAZIONE_GENERALE"] +
@@ -1469,7 +1532,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]
     )
 
-    if fl_score >= 6:
+    if has_worker_training_title and fl_score >= 8:
         modulo = ""
 
         if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= max(scores["FORMAZIONE_GENERALE"], scores["FORMAZIONE_SPECIFICA"]) and is_update:
@@ -1479,11 +1542,11 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
             modulo = "generale"
             tipo = "base"
         else:
-            if "rischio alto" in title_blob or "rischio alto" in full_blob:
+            if "rischio alto" in title_blob:
                 modulo = "specifica_rischio_alto"
-            elif "rischio medio" in title_blob or "rischio medio" in full_blob:
+            elif "rischio medio" in title_blob:
                 modulo = "specifica_rischio_medio"
-            elif "rischio basso" in title_blob or "rischio basso" in full_blob:
+            elif "rischio basso" in title_blob:
                 modulo = "specifica_rischio_basso"
             else:
                 modulo = "specifica"
@@ -1496,11 +1559,12 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     best_family, best_score = ordered[0]
     second_family, second_score = ordered[1]
 
-    if best_family == "RLS":
+    if best_family == "RLS" and best_score >= 8:
         debug.append("RLS forzato come aggiornamento")
         return "RLS", "aggiornamento", "", scores, debug
 
-    if best_score <= 0 or (best_score - second_score) <= 1:
+    # famiglia valida solo se emerge in modo chiaro
+    if best_score < 8 or (best_score - second_score) <= 2:
         debug.append("famiglia corso incerta")
         return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", "", scores, debug
 
