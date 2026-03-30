@@ -1433,7 +1433,9 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "CORSO_NON_RICONOSCIUTO": 0,
     }
 
-    # Se è testo da nomina, non provare nemmeno a inferire corsi
+    # =====================================================
+    # BLOCCO NOMINA
+    # =====================================================
     if detect_nomina_strong(zones.get("full_text", ""), filename):
         debug.append("blocco parser corsi: testo riconosciuto come nomina")
         return "CORSO_NON_RICONOSCIUTO", "base", "", scores, debug
@@ -1442,8 +1444,11 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
     )
 
-    # famiglie specifiche: conta quasi solo titolo e poco identity, corpo quasi zero
-    for family in [
+    # =====================================================
+    # FAMIGLIE SPECIFICHE
+    # Qui il titolo pesa molto, la identity poco, il body quasi niente
+    # =====================================================
+    specific_families = [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
         "PREPOSTO",
@@ -1454,18 +1459,25 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "PLE",
         "LAVORI_IN_QUOTA",
         "HACCP",
-    ]:
+    ]
+
+    for family in specific_families:
         kws = SPECIFIC_COURSE_KEYWORDS[family]
+
         title_hits = count_keywords(title_blob, kws)
         identity_hits = count_keywords(identity_blob, kws)
         body_hits_raw = count_keywords(body_blob, kws)
 
-        # il corpo pesa pochissimo perché l'OCR sporco genera falsi positivi
+        # Il body OCR pesa pochissimo
+        # Conta solo come micro-conferma se ci sono almeno 3 match
         body_hits = 1 if body_hits_raw >= 3 else 0
 
-        scores[family] += title_hits * 8
-        scores[family] += identity_hits * 2
-        scores[family] += body_hits
+        score_add = 0
+        score_add += title_hits * 8
+        score_add += identity_hits * 2
+        score_add += body_hits
+
+        scores[family] += score_add
 
         if title_hits:
             debug.append(f"{family}: +{title_hits * 8} match titolo")
@@ -1474,7 +1486,10 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         if body_hits:
             debug.append(f"{family}: +{body_hits} match corpo")
 
-    # FORMAZIONE LAVORATORI scatta solo se ci sono segnali chiari nel titolo/testa
+    # =====================================================
+    # BLOCCO FORMAZIONE LAVORATORI
+    # Deve emergere davvero dal titolo/header, non dal body sporco
+    # =====================================================
     fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
     fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
     fl_title = count_keywords(title_blob, GENERIC_WORKER_TRAINING_PATTERNS)
@@ -1487,7 +1502,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     scores["FORMAZIONE_SPECIFICA"] += fs_title * 8
     scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 8
 
-    # il full text aiuta poco, non deve dominare
+    # Il full text aiuta poco e non deve dominare
     scores["FORMAZIONE_GENERALE"] += fg_full * 1
     scores["FORMAZIONE_SPECIFICA"] += fs_full * 1
     scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_full * 1
@@ -1517,7 +1532,9 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["FORMAZIONE_SPECIFICA"] += 3
         debug.append("FORMAZIONE_SPECIFICA: +3 rischio basso nel titolo")
 
-    # unificazione formazione lavoratori SOLO se il titolo parla davvero di formazione lavoratori
+    # =====================================================
+    # SCORE UNIFICATO FORMAZIONE LAVORATORI
+    # =====================================================
     has_worker_training_title = (
         fl_title > 0
         or fg_title > 0
@@ -1532,10 +1549,41 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]
     )
 
-    if has_worker_training_title and fl_score >= 8:
+    best_specific_family = max(specific_families, key=lambda k: scores[k])
+    best_specific_score = scores[best_specific_family]
+
+    debug.append(f"best_specific_family={best_specific_family}")
+    debug.append(f"best_specific_score={best_specific_score}")
+    debug.append(f"fl_score={fl_score}")
+
+    # =====================================================
+    # REGOLA 1:
+    # Se una famiglia specifica è chiaramente dominante, vince lei
+    # =====================================================
+    if best_specific_score >= 10 and best_specific_score >= fl_score + 2:
+        debug.append(
+            f"famiglia specifica dominante forzata: "
+            f"{best_specific_family} ({best_specific_score} vs fl_score={fl_score})"
+        )
+        return best_specific_family, "aggiornamento" if is_update else "base", "", scores, debug
+
+    # =====================================================
+    # REGOLA 2:
+    # FORMAZIONE_LAVORATORI vince solo se:
+    # - il titolo parla davvero di formazione lavoratori
+    # - il suo score è abbastanza forte
+    # - non è battuta chiaramente da una famiglia specifica
+    # =====================================================
+    if has_worker_training_title and fl_score >= 8 and fl_score >= best_specific_score:
         modulo = ""
 
-        if scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= max(scores["FORMAZIONE_GENERALE"], scores["FORMAZIONE_SPECIFICA"]) and is_update:
+        if (
+            scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] >= max(
+                scores["FORMAZIONE_GENERALE"],
+                scores["FORMAZIONE_SPECIFICA"]
+            )
+            and is_update
+        ):
             modulo = "aggiornamento"
             tipo = "aggiornamento"
         elif scores["FORMAZIONE_GENERALE"] >= scores["FORMAZIONE_SPECIFICA"]:
@@ -1552,20 +1600,41 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
                 modulo = "specifica"
             tipo = "base"
 
-        debug.append(f"famiglia unificata FORMAZIONE_LAVORATORI (score={fl_score}, modulo={modulo}, tipo={tipo})")
+        debug.append(
+            f"famiglia unificata FORMAZIONE_LAVORATORI "
+            f"(fl_score={fl_score}, best_specific={best_specific_family}:{best_specific_score}, modulo={modulo}, tipo={tipo})"
+        )
         return "FORMAZIONE_LAVORATORI", tipo, modulo, scores, debug
 
+    # =====================================================
+    # REGOLA 3:
+    # Caso speciale RLS = aggiornamento
+    # =====================================================
+    if scores["RLS"] >= 8 and scores["RLS"] >= fl_score + 2:
+        debug.append("RLS forzato come aggiornamento")
+        return "RLS", "aggiornamento", "", scores, debug
+
+    # =====================================================
+    # REGOLA 4:
+    # Fallback finale tra tutte le famiglie
+    # Ma solo se emerge chiaramente un vincitore
+    # =====================================================
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_family, best_score = ordered[0]
     second_family, second_score = ordered[1]
 
-    if best_family == "RLS" and best_score >= 8:
-        debug.append("RLS forzato come aggiornamento")
-        return "RLS", "aggiornamento", "", scores, debug
+    debug.append(f"ordered_best={best_family}:{best_score}")
+    debug.append(f"ordered_second={second_family}:{second_score}")
 
-    # famiglia valida solo se emerge in modo chiaro
-    if best_score < 8 or (best_score - second_score) <= 2:
-        debug.append("famiglia corso incerta")
+    # Se non emerge niente di chiaro, meglio non inventare
+    if best_score < 8:
+        debug.append("famiglia corso incerta: best_score troppo basso")
+        return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", "", scores, debug
+
+    if (best_score - second_score) <= 2:
+        debug.append(
+            f"famiglia corso incerta: delta troppo basso ({best_family}:{best_score} vs {second_family}:{second_score})"
+        )
         return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", "", scores, debug
 
     debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
@@ -2165,7 +2234,25 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     result["distinct_categories"] = distinct
     result["debug"] = debug_rows
 
-    if len(distinct) >= 2:
+    counts: Dict[str, int] = {}
+for c in meaningful:
+    counts[c] = counts.get(c, 0) + 1
+
+result["page_categories"] = page_categories
+result["dominant_category"] = dominant
+result["distinct_categories"] = distinct
+result["debug"] = debug_rows
+
+# Documento misto solo se:
+# - ci sono almeno 2 categorie significative
+# - e almeno due pagine appartengono alla categoria secondaria
+#   oppure il dominante non è davvero dominante
+if len(distinct) >= 2:
+    ordered_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+    top_count = ordered_counts[0][1]
+    second_count = ordered_counts[1][1] if len(ordered_counts) > 1 else 0
+
+    if second_count >= 2 or top_count == second_count:
         result["is_mixed"] = True
 
     return result
