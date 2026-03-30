@@ -364,7 +364,20 @@ DATE_NEGATIVE_CONTEXTS = [
     "rilasciato il",
     "n. iscrizione",
 ]
-
+MONTHS_IT = {
+    "gennaio": 1,
+    "febbraio": 2,
+    "marzo": 3,
+    "aprile": 4,
+    "maggio": 5,
+    "giugno": 6,
+    "luglio": 7,
+    "agosto": 8,
+    "settembre": 9,
+    "ottobre": 10,
+    "novembre": 11,
+    "dicembre": 12,
+}
 
 # =========================================================
 # HELPERS BASE
@@ -494,8 +507,11 @@ def remove_noise_lines(text: str) -> str:
 # =========================================================
 
 def parse_date(date_str: str) -> Optional[datetime]:
-    date_str = (date_str or "").strip()
+    date_str = normalize_spaces(date_str or "")
+    if not date_str:
+        return None
 
+    # formato numerico: 01/10/2021
     m = re.fullmatch(r"(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})", date_str)
     if m:
         d = int(m.group(1))
@@ -508,6 +524,23 @@ def parse_date(date_str: str) -> Optional[datetime]:
         except ValueError:
             return None
 
+    # formato testuale italiano: 01 Ottobre 2021
+    text_norm = normalize_text_for_matching(date_str)
+    m2 = re.fullmatch(
+        r"(\d{1,2})\s+(gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+(\d{4})",
+        text_norm,
+    )
+    if m2:
+        d = int(m2.group(1))
+        month_name = m2.group(2)
+        y = int(m2.group(3))
+        mth = MONTHS_IT.get(month_name)
+        if mth:
+            try:
+                return datetime(y, mth, d)
+            except ValueError:
+                return None
+
     for fmt in ("%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%d.%m.%Y", "%d.%m.%y"):
         try:
             dt = datetime.strptime(date_str, fmt)
@@ -516,6 +549,7 @@ def parse_date(date_str: str) -> Optional[datetime]:
             return dt
         except Exception:
             continue
+
     return None
 
 
@@ -533,12 +567,25 @@ def add_years_safe(dt: datetime, years: int) -> datetime:
 
 
 def extract_dates(text: str) -> List[datetime]:
-    raw_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", text or "")
     out = []
-    for d in raw_dates:
+
+    raw_numeric_dates = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", text or "")
+    raw_text_dates = re.findall(
+        r"\b\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4}\b",
+        normalize_text_for_matching(text or ""),
+        flags=re.IGNORECASE,
+    )
+
+    for d in raw_numeric_dates:
         dt = parse_date(d)
         if dt:
             out.append(dt)
+
+    for d in raw_text_dates:
+        dt = parse_date(d)
+        if dt:
+            out.append(dt)
+
     return out
 
 
@@ -546,9 +593,11 @@ def extract_birth_date(text: str) -> Optional[datetime]:
     patterns = [
         r"(nato a|nata a|nato\/a a|nato in|nata in).*?(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
         r"(nato il|nata il|data di nascita).*?(\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4})",
+        r"(nato a|nata a|nato\/a a|nato in|nata in).*?(\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4})",
+        r"(nato il|nata il|data di nascita).*?(\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4})",
     ]
     for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
+        m = re.search(pat, normalize_text_for_matching(text), re.IGNORECASE | re.DOTALL)
         if m:
             return parse_date(m.group(2))
     return None
@@ -1408,7 +1457,6 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
 # =========================================================
 # DETECTION CORSO ATTESTATI
 # =========================================================
-
 def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[str, str, str, Dict[str, int], List[str]]:
     title_blob = normalize_text_for_matching(f"{filename}\n{zones.get('title_zone', '')}")
     identity_blob = normalize_text_for_matching(zones.get("identity_zone", ""))
@@ -1433,9 +1481,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "CORSO_NON_RICONOSCIUTO": 0,
     }
 
-    # =====================================================
-    # BLOCCO NOMINA
-    # =====================================================
     if detect_nomina_strong(zones.get("full_text", ""), filename):
         debug.append("blocco parser corsi: testo riconosciuto come nomina")
         return "CORSO_NON_RICONOSCIUTO", "base", "", scores, debug
@@ -1444,10 +1489,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
     )
 
-    # =====================================================
-    # FAMIGLIE SPECIFICHE
-    # Qui il titolo pesa molto, la identity poco, il body quasi niente
-    # =====================================================
     specific_families = [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
@@ -1468,16 +1509,11 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         identity_hits = count_keywords(identity_blob, kws)
         body_hits_raw = count_keywords(body_blob, kws)
 
-        # Il body OCR pesa pochissimo
-        # Conta solo come micro-conferma se ci sono almeno 3 match
         body_hits = 1 if body_hits_raw >= 3 else 0
 
-        score_add = 0
-        score_add += title_hits * 8
-        score_add += identity_hits * 2
-        score_add += body_hits
-
-        scores[family] += score_add
+        scores[family] += title_hits * 8
+        scores[family] += identity_hits * 2
+        scores[family] += body_hits
 
         if title_hits:
             debug.append(f"{family}: +{title_hits * 8} match titolo")
@@ -1486,10 +1522,12 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         if body_hits:
             debug.append(f"{family}: +{body_hits} match corpo")
 
-    # =====================================================
-    # BLOCCO FORMAZIONE LAVORATORI
-    # Deve emergere davvero dal titolo/header, non dal body sporco
-    # =====================================================
+    # boost specifico per attestati come quello caricato:
+    # "Corso di Aggiornamento per Addetti Antincendio Rischio Medio"
+    if "aggiornamento" in title_blob and "antincendio" in title_blob:
+        scores["ANTINCENDIO"] += 10
+        debug.append("ANTINCENDIO: +10 boost aggiornamento+antincendio nel titolo")
+
     fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
     fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
     fl_title = count_keywords(title_blob, GENERIC_WORKER_TRAINING_PATTERNS)
@@ -1502,7 +1540,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     scores["FORMAZIONE_SPECIFICA"] += fs_title * 8
     scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 8
 
-    # Il full text aiuta poco e non deve dominare
     scores["FORMAZIONE_GENERALE"] += fg_full * 1
     scores["FORMAZIONE_SPECIFICA"] += fs_full * 1
     scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_full * 1
@@ -1532,9 +1569,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["FORMAZIONE_SPECIFICA"] += 3
         debug.append("FORMAZIONE_SPECIFICA: +3 rischio basso nel titolo")
 
-    # =====================================================
-    # SCORE UNIFICATO FORMAZIONE LAVORATORI
-    # =====================================================
     has_worker_training_title = (
         fl_title > 0
         or fg_title > 0
@@ -1556,10 +1590,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     debug.append(f"best_specific_score={best_specific_score}")
     debug.append(f"fl_score={fl_score}")
 
-    # =====================================================
-    # REGOLA 1:
-    # Se una famiglia specifica è chiaramente dominante, vince lei
-    # =====================================================
     if best_specific_score >= 10 and best_specific_score >= fl_score + 2:
         debug.append(
             f"famiglia specifica dominante forzata: "
@@ -1567,13 +1597,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         )
         return best_specific_family, "aggiornamento" if is_update else "base", "", scores, debug
 
-    # =====================================================
-    # REGOLA 2:
-    # FORMAZIONE_LAVORATORI vince solo se:
-    # - il titolo parla davvero di formazione lavoratori
-    # - il suo score è abbastanza forte
-    # - non è battuta chiaramente da una famiglia specifica
-    # =====================================================
     if has_worker_training_title and fl_score >= 8 and fl_score >= best_specific_score:
         modulo = ""
 
@@ -1606,19 +1629,10 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         )
         return "FORMAZIONE_LAVORATORI", tipo, modulo, scores, debug
 
-    # =====================================================
-    # REGOLA 3:
-    # Caso speciale RLS = aggiornamento
-    # =====================================================
     if scores["RLS"] >= 8 and scores["RLS"] >= fl_score + 2:
         debug.append("RLS forzato come aggiornamento")
         return "RLS", "aggiornamento", "", scores, debug
 
-    # =====================================================
-    # REGOLA 4:
-    # Fallback finale tra tutte le famiglie
-    # Ma solo se emerge chiaramente un vincitore
-    # =====================================================
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_family, best_score = ordered[0]
     second_family, second_score = ordered[1]
@@ -1626,7 +1640,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     debug.append(f"ordered_best={best_family}:{best_score}")
     debug.append(f"ordered_second={second_family}:{second_score}")
 
-    # Se non emerge niente di chiaro, meglio non inventare
     if best_score < 8:
         debug.append("famiglia corso incerta: best_score troppo basso")
         return "CORSO_NON_RICONOSCIUTO", "aggiornamento" if is_update else "base", "", scores, debug
@@ -1641,21 +1654,30 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     return best_family, "aggiornamento" if is_update else "base", "", scores, debug
 
 
+
 # =========================================================
 # DATE PESATE
 # =========================================================
-
 def build_date_candidates(text: str) -> List[Dict[str, Any]]:
     lines = [l.strip() for l in normalize_spaces(text).splitlines() if l.strip()]
     candidates: List[Dict[str, Any]] = []
 
     for i, line in enumerate(lines):
-        found = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", line)
+        found_numeric = re.findall(r"\b\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}\b", line)
+        found_textual = re.findall(
+            r"\b\d{1,2}\s+(?:gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|settembre|ottobre|novembre|dicembre)\s+\d{4}\b",
+            normalize_text_for_matching(line),
+            flags=re.IGNORECASE,
+        )
+
+        found = list(found_numeric) + list(found_textual)
+
         if not found:
             continue
 
         context_window = " ".join(lines[max(0, i - 2): min(len(lines), i + 3)])
         context_norm = normalize_text_for_matching(context_window)
+        line_norm = normalize_text_for_matching(line)
 
         for raw_date in found:
             dt = parse_date(raw_date)
@@ -1676,6 +1698,15 @@ def build_date_candidates(text: str) -> List[Dict[str, Any]]:
             if any(neg in context_norm for neg in DATE_NEGATIVE_CONTEXTS):
                 score -= 20
                 reasons.append("negative_context")
+
+            # bonus forte su formule tipiche del corso
+            if "svolto in data" in line_norm:
+                score += 18
+                reasons.append("svolto_in_data_line")
+
+            if "perugia" in line_norm and dt.year >= 2000:
+                score += 8
+                reasons.append("place_and_date_line")
 
             if 1990 <= dt.year <= datetime.now().year + 1:
                 score += 1
@@ -2222,11 +2253,12 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     meaningful = [c for c in page_categories if c not in {"vuota", "altri_da_verificare"}]
     distinct = sorted(list(set(meaningful)))
 
+    counts: Dict[str, int] = {}
+    for c in meaningful:
+        counts[c] = counts.get(c, 0) + 1
+
     dominant = None
-    if meaningful:
-        counts: Dict[str, int] = {}
-        for c in meaningful:
-            counts[c] = counts.get(c, 0) + 1
+    if counts:
         dominant = max(counts, key=counts.get)
 
     result["page_categories"] = page_categories
@@ -2234,29 +2266,16 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     result["distinct_categories"] = distinct
     result["debug"] = debug_rows
 
-    counts: Dict[str, int] = {}
-for c in meaningful:
-    counts[c] = counts.get(c, 0) + 1
+    # Documento misto solo se la seconda categoria è davvero consistente
+    if len(distinct) >= 2:
+        ordered_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
+        top_count = ordered_counts[0][1]
+        second_count = ordered_counts[1][1] if len(ordered_counts) > 1 else 0
 
-result["page_categories"] = page_categories
-result["dominant_category"] = dominant
-result["distinct_categories"] = distinct
-result["debug"] = debug_rows
-
-# Documento misto solo se:
-# - ci sono almeno 2 categorie significative
-# - e almeno due pagine appartengono alla categoria secondaria
-#   oppure il dominante non è davvero dominante
-if len(distinct) >= 2:
-    ordered_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
-    top_count = ordered_counts[0][1]
-    second_count = ordered_counts[1][1] if len(ordered_counts) > 1 else 0
-
-    if second_count >= 2 or top_count == second_count:
-        result["is_mixed"] = True
+        if second_count >= 2 or top_count == second_count:
+            result["is_mixed"] = True
 
     return result
-
 
 # =========================================================
 # ANALISI DOCUMENTO
