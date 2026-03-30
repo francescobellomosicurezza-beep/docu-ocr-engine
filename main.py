@@ -1175,6 +1175,7 @@ def split_text_zones(text: str) -> Dict[str, str]:
 def detect_nomina_strong(text: str, filename: str = "") -> bool:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
 
+    # segnali veramente forti da nomina
     strong_nomina_phrases = [
         "lettera di nomina",
         "nomina",
@@ -1183,13 +1184,12 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "viene designato",
         "si nomina",
         "si designa",
-        "incaricato di",
-        "addetto al",
-        "addetto alla",
+        "incarico di",
         "nomina ad addetto",
         "designazione ad addetto",
     ]
 
+    # ruoli sicurezza: da soli NON bastano
     role_phrases = [
         "primo soccorso",
         "antincendio",
@@ -1201,6 +1201,7 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "responsabile del servizio di prevenzione e protezione",
     ]
 
+    # segnali forti da attestato / programma corso
     neg_attestato_phrases = [
         "attestato di frequenza",
         "attestato di formazione",
@@ -1209,20 +1210,22 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "ha frequentato",
         "ha partecipato",
         "programma del corso",
+        "programma corso",
+        "corso di aggiornamento",
+        "data di svolgimento del corso",
     ]
 
     strong_hits = sum(1 for p in strong_nomina_phrases if p in blob)
     role_hits = sum(1 for p in role_phrases if p in blob)
     attestato_hits = sum(1 for p in neg_attestato_phrases if p in blob)
 
-    # Nomina forte se:
-    # - ha almeno 1 frase forte di nomina + almeno 1 ruolo
-    # - e NON ha chiari segnali da attestato
+    # Deve esserci almeno una vera formula di nomina
+    # e non devono esserci forti segnali da attestato/programma
     if strong_hits >= 1 and role_hits >= 1 and attestato_hits == 0:
         return True
 
-    # fallback OCR: se ha almeno 2 indicatori forti da nomina e 1 ruolo, considerala nomina
-    if strong_hits >= 2 and role_hits >= 1:
+    # fallback ancora prudente
+    if strong_hits >= 2 and role_hits >= 1 and attestato_hits == 0:
         return True
 
     return False
@@ -2240,13 +2243,34 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     page_categories = []
     debug_rows = []
 
+    first_page_category = None
+
     for idx, page_text in enumerate(pages_text, start=1):
         if not page_text or len(page_text.strip()) < 20:
             page_categories.append("vuota")
             debug_rows.append(f"p{idx}=vuota")
             continue
 
+        page_blob = normalize_text_for_matching(page_text)
+
         cat, _, _ = score_category(page_text, f"{filename}#page_{idx}")
+
+        if idx == 1:
+            first_page_category = cat
+
+        # REGOLA SPECIALE:
+        # se la prima pagina è attestato e una pagina successiva è il programma del corso,
+        # trattala comunque come parte dell'attestato
+        if idx > 1 and first_page_category == "attestati":
+            if (
+                "programma corso" in page_blob
+                or "programma del corso" in page_blob
+                or "programma corso di aggiornamento" in page_blob
+            ):
+                debug_rows.append(f"p{idx}=attestati_programma_corso")
+                page_categories.append("attestati")
+                continue
+
         page_categories.append(cat)
         debug_rows.append(f"p{idx}={cat}")
 
