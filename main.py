@@ -1175,7 +1175,6 @@ def split_text_zones(text: str) -> Dict[str, str]:
 def detect_nomina_strong(text: str, filename: str = "") -> bool:
     blob = normalize_text_for_matching(f"{filename}\n{text}")
 
-    # segnali veramente forti da nomina
     strong_nomina_phrases = [
         "lettera di nomina",
         "nomina",
@@ -1189,7 +1188,6 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "designazione ad addetto",
     ]
 
-    # ruoli sicurezza: da soli NON bastano
     role_phrases = [
         "primo soccorso",
         "antincendio",
@@ -1201,7 +1199,6 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "responsabile del servizio di prevenzione e protezione",
     ]
 
-    # segnali forti da attestato / programma corso
     neg_attestato_phrases = [
         "attestato di frequenza",
         "attestato di formazione",
@@ -1213,18 +1210,16 @@ def detect_nomina_strong(text: str, filename: str = "") -> bool:
         "programma corso",
         "corso di aggiornamento",
         "data di svolgimento del corso",
+        "data svolgimento del corso",
     ]
 
     strong_hits = sum(1 for p in strong_nomina_phrases if p in blob)
     role_hits = sum(1 for p in role_phrases if p in blob)
     attestato_hits = sum(1 for p in neg_attestato_phrases if p in blob)
 
-    # Deve esserci almeno una vera formula di nomina
-    # e non devono esserci forti segnali da attestato/programma
     if strong_hits >= 1 and role_hits >= 1 and attestato_hits == 0:
         return True
 
-    # fallback ancora prudente
     if strong_hits >= 2 and role_hits >= 1 and attestato_hits == 0:
         return True
 
@@ -2242,7 +2237,6 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
 
     page_categories = []
     debug_rows = []
-
     first_page_category = None
 
     for idx, page_text in enumerate(pages_text, start=1):
@@ -2252,15 +2246,17 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
             continue
 
         page_blob = normalize_text_for_matching(page_text)
-
-        cat, _, _ = score_category(page_text, f"{filename}#page_{idx}")
+        cat, scores_tmp, meta_tmp = score_category(page_text, f"{filename}#page_{idx}")
 
         if idx == 1:
             first_page_category = cat
 
-        # REGOLA SPECIALE:
-        # se la prima pagina è attestato e una pagina successiva è il programma del corso,
-        # trattala comunque come parte dell'attestato
+        debug_rows.append(
+            f"p{idx}_raw_category={cat} | first_page_category={first_page_category} | "
+            f"has_programma={'programma corso' in page_blob or 'programma del corso' in page_blob}"
+        )
+
+        # pagina programma allegata a un attestato
         if idx > 1 and first_page_category == "attestati":
             if (
                 "programma corso" in page_blob
@@ -2290,7 +2286,6 @@ def detect_mixed_pdf_categories(filename: str, content: bytes, content_type: str
     result["distinct_categories"] = distinct
     result["debug"] = debug_rows
 
-    # Documento misto solo se la seconda categoria è davvero consistente
     if len(distinct) >= 2:
         ordered_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
         top_count = ordered_counts[0][1]
