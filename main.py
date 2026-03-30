@@ -2717,7 +2717,7 @@ async def organize_zip(
         raise HTTPException(status_code=400, detail="Nessun file caricato")
 
     overrides_map = parse_overrides_json(overrides_json)
-
+ 
     files_data: List[Tuple[UploadFile, bytes]] = []
     analyzed: List[Dict[str, Any]] = []
 
