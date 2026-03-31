@@ -1529,7 +1529,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
     )
 
-    specific_families = [
+        specific_families = [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
         "PREPOSTO",
@@ -1542,7 +1542,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "HACCP",
     ]
 
-        for family in specific_families:
+    for family in specific_families:
         kws = SPECIFIC_COURSE_KEYWORDS[family]
 
         title_hits = count_keywords(title_blob, kws)
