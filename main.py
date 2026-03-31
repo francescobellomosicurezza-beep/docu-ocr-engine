@@ -1315,8 +1315,8 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
         
     if "programma corso" in title_blob or "programma del corso" in title_blob:
-    scores["attestati"] += 6
-    debug["positive_hits"].append("attestati:+6 titolo da programma corso allegato")
+        scores["attestati"] += 6
+        debug["positive_hits"].append("attestati:+6 titolo da programma corso allegato")
     
     # =====================================================
     # NOMINE
