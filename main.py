@@ -2766,6 +2766,11 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
         item = await analyze_upload(file)
         return {"results": [item]}
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print("ERRORE /analyze")
+        print(tb)
+
         return JSONResponse(
             status_code=200,
             content={
@@ -2799,11 +2804,14 @@ async def analyze(file: Annotated[UploadFile, File(...)]):
                     "ocr_soft_limit": OCR_SOFT_LIMIT,
                     "ocr_alert": False,
                     "extraction_error": str(e),
-                    "parser_debug": ["eccezione gestita in endpoint /analyze"],
+                    "parser_debug": [
+                        "eccezione gestita in endpoint /analyze",
+                        str(e),
+                        tb[:4000],
+                    ],
                 }]
             }
         )
-
 
 @app.post("/analyze-batch")
 async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
@@ -2815,9 +2823,11 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
         try:
             item = await analyze_upload(file)
             results.append(item)
-                except Exception as e:
+        except Exception as e:
             import traceback
             tb = traceback.format_exc()
+            print("ERRORE /analyze-batch")
+            print(tb)
 
             results.append({
                 "filename": file.filename if file else "",
@@ -2851,7 +2861,8 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
                 "extraction_error": str(e),
                 "parser_debug": [
                     "eccezione gestita in endpoint /analyze-batch",
-                    tb
+                    str(e),
+                    tb[:4000],
                 ],
             })
 
