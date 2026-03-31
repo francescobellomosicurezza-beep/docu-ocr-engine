@@ -182,7 +182,30 @@ GENERIC_WORKER_TRAINING_PATTERNS = [
     "formazione dei lavoratori",
     "formazione lavoratori",
 ]
-
+GENERAL_TRAINING_KEYWORDS = {
+    "FORMAZIONE_GENERALE": [
+        "formazione generale",
+        "formazione generale lavoratori",
+        "modulo generale",
+        "formazione dei lavoratori parte generale",
+        "formazione dei lavoratori - parte generale",
+        "formazione lavoratori parte generale",
+        "concetti generali in tema di prevenzione e sicurezza sul lavoro",
+        "concetti generali di prevenzione e sicurezza sul lavoro",
+    ],
+    "FORMAZIONE_SPECIFICA": [
+        "formazione specifica",
+        "formazione specifica lavoratori",
+        "modulo specifico",
+        "formazione dei lavoratori parte specifica",
+        "formazione dei lavoratori - parte specifica",
+        "formazione lavoratori parte specifica",
+        "rischi specifici",
+        "formazione specifica rischio basso",
+        "formazione specifica rischio medio",
+        "formazione specifica rischio alto",
+    ],
+}
 SPECIFIC_COURSE_KEYWORDS = {
     "PRIMO_SOCCORSO": [
         "primo soccorso",
@@ -1500,7 +1523,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     body_blob = normalize_text_for_matching(zones.get("body_zone", ""))
     full_blob = normalize_text_for_matching(zones.get("full_text", ""))
 
-    debug = []
+    debug: List[str] = []
 
     debug.append(f"title_blob={title_blob[:500]}")
     debug.append(f"PLE_check_ple={'ple' in title_blob}")
@@ -1549,7 +1572,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     ]
 
     for family in specific_families:
-        kws = SPECIFIC_COURSE_KEYWORDS[family]
+        kws = SPECIFIC_COURSE_KEYWORDS.get(family, [])
 
         title_hits = count_keywords(title_blob, kws)
         identity_hits = count_keywords(identity_blob, kws)
@@ -1680,21 +1703,24 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["ANTINCENDIO"] += 10
         debug.append("ANTINCENDIO: +10 boost aggiornamento+antincendio nel titolo")
 
-    fg_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
-    fs_title = count_keywords(title_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
+    fg_keywords = GENERAL_TRAINING_KEYWORDS.get("FORMAZIONE_GENERALE", [])
+    fs_keywords = GENERAL_TRAINING_KEYWORDS.get("FORMAZIONE_SPECIFICA", [])
+
+    fg_title = count_keywords(title_blob, fg_keywords)
+    fs_title = count_keywords(title_blob, fs_keywords)
     fl_title = count_keywords(title_blob, GENERIC_WORKER_TRAINING_PATTERNS)
 
-    fg_full = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_GENERALE"])
-    fs_full = count_keywords(full_blob, GENERAL_TRAINING_KEYWORDS["FORMAZIONE_SPECIFICA"])
+    fg_full = count_keywords(full_blob, fg_keywords)
+    fs_full = count_keywords(full_blob, fs_keywords)
     fl_full = count_keywords(full_blob, GENERIC_WORKER_TRAINING_PATTERNS)
 
     scores["FORMAZIONE_GENERALE"] += fg_title * 8
     scores["FORMAZIONE_SPECIFICA"] += fs_title * 8
     scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_title * 8
 
-    scores["FORMAZIONE_GENERALE"] += fg_full * 1
-    scores["FORMAZIONE_SPECIFICA"] += fs_full * 1
-    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_full * 1
+    scores["FORMAZIONE_GENERALE"] += fg_full
+    scores["FORMAZIONE_SPECIFICA"] += fs_full
+    scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"] += fl_full
 
     if fg_title:
         debug.append(f"FORMAZIONE_GENERALE: +{fg_title * 8} match titolo")
@@ -1730,9 +1756,9 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     )
 
     fl_score = (
-        scores["FORMAZIONE_GENERALE"] +
-        scores["FORMAZIONE_SPECIFICA"] +
-        scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]
+        scores["FORMAZIONE_GENERALE"]
+        + scores["FORMAZIONE_SPECIFICA"]
+        + scores["AGGIORNAMENTO_FORMAZIONE_LAVORATORI"]
     )
 
     best_specific_family = max(specific_families, key=lambda k: scores[k])
@@ -1804,8 +1830,6 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
 
     debug.append(f"famiglia scelta: {best_family} ({best_score} vs {second_score})")
     return best_family, "aggiornamento" if is_update else "base", "", scores, debug
-
-
 
 # =========================================================
 # DATE PESATE
