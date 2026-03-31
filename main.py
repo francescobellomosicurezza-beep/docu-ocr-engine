@@ -1504,6 +1504,15 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     full_blob = normalize_text_for_matching(zones.get("full_text", ""))
 
     debug = []
+
+    debug.append(f"title_blob={title_blob[:500]}")
+    debug.append(f"PLE_check_ple={'ple' in title_blob}")
+    debug.append(f"PLE_check_uso_di_ple={'uso di ple' in title_blob}")
+    debug.append(f"PLE_check_utilizzo_di_ple={'utilizzo di ple' in title_blob}")
+    debug.append("PLE_check_addetti_all_uso_di_ple=" + str("addetti all'uso di ple" in title_blob))
+    debug.append("PLE_check_addetti_all_uso_di_ple_curly=" + str("addetti all’uso di ple" in title_blob))
+    debug.append(f"PLE_check_con_o_senza_stabilizzatori={'con o senza stabilizzatori' in title_blob}")
+
     scores: Dict[str, int] = {
         "FORMAZIONE_GENERALE": 0,
         "FORMAZIONE_SPECIFICA": 0,
@@ -1567,18 +1576,25 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
     # =====================================================
 
     # PLE
-    if (
-        "ple" in title_blob
-        and (
-            "uso di ple" in title_blob
-            or "utilizzo di ple" in title_blob
-            or "con o senza stabilizzatori" in title_blob
-            or "addetti all'uso di ple" in title_blob
-            or "addetti all’uso di ple" in title_blob
-        )
-    ):
-        scores["PLE"] += 10
-        debug.append("PLE: +10 boost titolo esplicito uso di PLE con/senza stabilizzatori")
+    if "ple" in title_blob:
+        scores["PLE"] += 6
+        debug.append("PLE: +6 presenza 'ple' nel titolo")
+
+        if "stabilizzatori" in title_blob:
+            scores["PLE"] += 6
+            debug.append("PLE: +6 presenza 'stabilizzatori' nel titolo")
+
+        if "uso di ple" in title_blob or "utilizzo di ple" in title_blob:
+            scores["PLE"] += 6
+            debug.append("PLE: +6 presenza uso/utilizzo di PLE nel titolo")
+
+        if "addetti all'uso di ple" in title_blob or "addetti all’uso di ple" in title_blob:
+            scores["PLE"] += 6
+            debug.append("PLE: +6 presenza addetti all'uso di PLE nel titolo")
+
+        if "con o senza stabilizzatori" in title_blob:
+            scores["PLE"] += 8
+            debug.append("PLE: +8 presenza con o senza stabilizzatori nel titolo")
 
     # CARRELLISTA
     if (
