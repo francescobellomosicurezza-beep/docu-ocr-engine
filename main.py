@@ -1529,7 +1529,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "aggiornamento" in full_blob and "formazione lavoratori" in full_blob
     )
 
-        specific_families = [
+    specific_families = [
         "PRIMO_SOCCORSO",
         "ANTINCENDIO",
         "PREPOSTO",
@@ -1662,7 +1662,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         scores["HACCP"] += 10
         debug.append("HACCP: +10 boost titolo esplicito")
 
-    # Boost specifico antincendio già utile sui tuoi casi reali
+    # Boost specifico antincendio
     if "aggiornamento" in title_blob and "antincendio" in title_blob:
         scores["ANTINCENDIO"] += 10
         debug.append("ANTINCENDIO: +10 boost aggiornamento+antincendio nel titolo")
