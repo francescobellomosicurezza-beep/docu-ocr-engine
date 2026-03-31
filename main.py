@@ -190,6 +190,9 @@ SPECIFIC_COURSE_KEYWORDS = {
         "addetti al primo soccorso",
         "incaricati al primo soccorso",
         "lavoratori incaricati al primo soccorso",
+        "corso di primo soccorso",
+        "aggiornamento primo soccorso",
+        "addetto primo soccorso",
         "d.m. 388/03",
         "dm 388/03",
         "388/03",
@@ -203,23 +206,38 @@ SPECIFIC_COURSE_KEYWORDS = {
         "gestione emergenze incendio",
         "addetto antincendio",
         "addetti antincendio",
+        "addetto alla prevenzione incendi",
+        "addetti alla prevenzione incendi",
         "incaricati antincendio",
+        "corso antincendio",
+        "aggiornamento antincendio",
+        "addetti alla lotta antincendio",
+        "gestione delle emergenze",
+        "rischio basso",
+        "rischio medio",
+        "rischio alto",
     ],
     "PREPOSTO": [
         "preposto",
         "corso preposto",
+        "aggiornamento preposto",
         "formazione particolare aggiuntiva per il preposto",
+        "formazione aggiuntiva per il preposto",
     ],
     "PONTEGGI": [
         "ponteggi",
         "montaggio smontaggio trasformazione ponteggi",
+        "montaggio e smontaggio ponteggi",
+        "trasformazione ponteggi",
         "pi.m.u.s",
         "pimus",
+        "addetti ai ponteggi",
     ],
     "RLS": [
         "rappresentante dei lavoratori per la sicurezza",
         " rls ",
         "r.l.s",
+        "corso rls",
         "aggiornamento rls",
     ],
     "RSPP_DL": [
@@ -227,6 +245,8 @@ SPECIFIC_COURSE_KEYWORDS = {
         "responsabile del servizio di prevenzione e protezione",
         "rspp datore di lavoro",
         "datore di lavoro che svolge i compiti del servizio di prevenzione e protezione",
+        "corso rspp datore di lavoro",
+        "aggiornamento rspp datore di lavoro",
     ],
     "CARRELLISTA": [
         "carrellista",
@@ -234,16 +254,35 @@ SPECIFIC_COURSE_KEYWORDS = {
         "carrelli elevatori",
         "muletto",
         "mulettista",
+        "addetto alla conduzione di carrelli elevatori",
+        "abilitazione carrelli elevatori",
+        "uso del carrello elevatore",
+        "conduzione di carrelli elevatori",
     ],
     "PLE": [
         "piattaforma di lavoro elevabile",
         "piattaforme di lavoro elevabili",
+        "ple",
+        "uso di ple",
+        "utilizzo di ple",
+        "addetti all'uso di ple",
+        "addetti all’uso di ple",
+        "lavoratori addetti all'uso di ple",
+        "lavoratori addetti all’uso di ple",
         "ple con stabilizzatori",
         "ple senza stabilizzatori",
+        "ple con o senza stabilizzatori",
+        "con o senza stabilizzatori",
+        "corso ple",
+        "aggiornamento ple",
     ],
     "LAVORI_IN_QUOTA": [
         "lavori in quota",
         "sistemi anticaduta",
+        "dpi anticaduta",
+        "uso dei dpi anticaduta",
+        "corso lavori in quota",
+        "aggiornamento lavori in quota",
     ],
     "HACCP": [
         "haccp",
@@ -264,22 +303,6 @@ SPECIFIC_COURSE_KEYWORDS = {
         "tipologia a",
         "tipologia b",
         "modulo integrativo",
-    ],
-}
-
-GENERAL_TRAINING_KEYWORDS = {
-    "FORMAZIONE_GENERALE": [
-        "formazione generale",
-        "parte generale",
-        "modulo generale",
-    ],
-    "FORMAZIONE_SPECIFICA": [
-        "formazione specifica",
-        "parte specifica",
-        "modulo specifico",
-        "rischio basso",
-        "rischio medio",
-        "rischio alto",
     ],
 }
 
@@ -1519,7 +1542,7 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         "HACCP",
     ]
 
-    for family in specific_families:
+        for family in specific_families:
         kws = SPECIFIC_COURSE_KEYWORDS[family]
 
         title_hits = count_keywords(title_blob, kws)
@@ -1539,8 +1562,107 @@ def score_course_family_by_zone(zones: Dict[str, str], filename: str) -> Tuple[s
         if body_hits:
             debug.append(f"{family}: +{body_hits} match corpo")
 
-    # boost specifico per attestati come quello caricato:
-    # "Corso di Aggiornamento per Addetti Antincendio Rischio Medio"
+    # =====================================================
+    # BOOST ESPLICITI SU TITOLO (corsi molto riconoscibili)
+    # =====================================================
+
+    # PLE
+    if (
+        "ple" in title_blob
+        and (
+            "uso di ple" in title_blob
+            or "utilizzo di ple" in title_blob
+            or "con o senza stabilizzatori" in title_blob
+            or "addetti all'uso di ple" in title_blob
+            or "addetti all’uso di ple" in title_blob
+        )
+    ):
+        scores["PLE"] += 10
+        debug.append("PLE: +10 boost titolo esplicito uso di PLE con/senza stabilizzatori")
+
+    # CARRELLISTA
+    if (
+        "carrello elevatore" in title_blob
+        or "carrelli elevatori" in title_blob
+        or "muletto" in title_blob
+        or "mulettista" in title_blob
+        or "conduzione di carrelli elevatori" in title_blob
+    ):
+        scores["CARRELLISTA"] += 10
+        debug.append("CARRELLISTA: +10 boost titolo esplicito")
+
+    # ANTINCENDIO
+    if "antincendio" in title_blob:
+        scores["ANTINCENDIO"] += 8
+        debug.append("ANTINCENDIO: +8 boost titolo esplicito")
+
+        if "aggiornamento" in title_blob:
+            scores["ANTINCENDIO"] += 4
+            debug.append("ANTINCENDIO: +4 aggiornamento nel titolo")
+
+    # PRIMO SOCCORSO
+    if "primo soccorso" in title_blob:
+        scores["PRIMO_SOCCORSO"] += 8
+        debug.append("PRIMO_SOCCORSO: +8 boost titolo esplicito")
+
+        if "aggiornamento" in title_blob:
+            scores["PRIMO_SOCCORSO"] += 4
+            debug.append("PRIMO_SOCCORSO: +4 aggiornamento nel titolo")
+
+    # PREPOSTO
+    if "preposto" in title_blob:
+        scores["PREPOSTO"] += 8
+        debug.append("PREPOSTO: +8 boost titolo esplicito")
+
+        if "aggiornamento" in title_blob:
+            scores["PREPOSTO"] += 4
+            debug.append("PREPOSTO: +4 aggiornamento nel titolo")
+
+    # RLS
+    if "rls" in title_blob or "rappresentante dei lavoratori per la sicurezza" in title_blob:
+        scores["RLS"] += 8
+        debug.append("RLS: +8 boost titolo esplicito")
+
+        if "aggiornamento" in title_blob:
+            scores["RLS"] += 4
+            debug.append("RLS: +4 aggiornamento nel titolo")
+
+    # RSPP DATORE DI LAVORO
+    if (
+        "rspp datore di lavoro" in title_blob
+        or "datore di lavoro rspp" in title_blob
+        or "datore di lavoro che svolge i compiti del servizio di prevenzione e protezione" in title_blob
+    ):
+        scores["RSPP_DL"] += 10
+        debug.append("RSPP_DL: +10 boost titolo esplicito")
+
+    # PONTEGGI
+    if (
+        "ponteggi" in title_blob
+        or "montaggio smontaggio trasformazione ponteggi" in title_blob
+        or "pimus" in title_blob
+        or "pi.m.u.s" in title_blob
+    ):
+        scores["PONTEGGI"] += 10
+        debug.append("PONTEGGI: +10 boost titolo esplicito")
+
+    # LAVORI IN QUOTA
+    if "lavori in quota" in title_blob or "anticaduta" in title_blob:
+        scores["LAVORI_IN_QUOTA"] += 10
+        debug.append("LAVORI_IN_QUOTA: +10 boost titolo esplicito")
+
+    # HACCP
+    if (
+        "haccp" in title_blob
+        or "igiene alimentare" in title_blob
+        or "igiene degli alimenti" in title_blob
+        or "alimentarista" in title_blob
+        or "alimentaristi" in title_blob
+    ):
+        scores["HACCP"] += 10
+        debug.append("HACCP: +10 boost titolo esplicito")
+
+    # Boost specifico antincendio già utile sui tuoi casi reali
     if "aggiornamento" in title_blob and "antincendio" in title_blob:
         scores["ANTINCENDIO"] += 10
         debug.append("ANTINCENDIO: +10 boost aggiornamento+antincendio nel titolo")
