@@ -1290,7 +1290,11 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if "conferito a" in blob or "rilasciato a" in blob:
         scores["attestati"] += 2
         debug["positive_hits"].append("attestati:+2 struttura tipica attestato")
-
+        
+    if "programma corso" in title_blob or "programma del corso" in title_blob:
+    scores["attestati"] += 6
+    debug["positive_hits"].append("attestati:+6 titolo da programma corso allegato")
+    
     # =====================================================
     # NOMINE
     # =====================================================
@@ -1314,13 +1318,28 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["nomine"] += 4
         debug["positive_hits"].append("nomine:+4 formula tipica nomina")
 
-    for _, kws in NOMINA_ROLE_KEYWORDS.items():
-        if has_any_keyword(title_blob, kws):
-            scores["nomine"] += 3
-        elif has_any_keyword(identity_blob, kws):
-            scores["nomine"] += 2
-        elif has_any_keyword(blob, kws):
-            scores["nomine"] += 1
+    nomina_structure_present = any(
+    x in blob for x in [
+        "nomina",
+        "designazione",
+        "lettera di nomina",
+        "viene nominato",
+        "viene designato",
+        "si nomina",
+        "si designa",
+        "incarico di",
+        "nomina ad addetto",
+        "designazione ad addetto",
+    ]
+)
+
+for _, kws in NOMINA_ROLE_KEYWORDS.items():
+    if has_any_keyword(title_blob, kws) and nomina_structure_present:
+        scores["nomine"] += 3
+    elif has_any_keyword(identity_blob, kws) and nomina_structure_present:
+        scores["nomine"] += 2
+    elif has_any_keyword(blob, kws) and nomina_structure_present:
+        scores["nomine"] += 1
 
     # =====================================================
     # VISITE MEDICHE
