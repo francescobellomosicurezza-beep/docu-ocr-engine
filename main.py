@@ -2815,7 +2815,10 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
         try:
             item = await analyze_upload(file)
             results.append(item)
-        except Exception as e:
+                except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+
             results.append({
                 "filename": file.filename if file else "",
                 "content_type": file.content_type if file else "",
@@ -2846,7 +2849,10 @@ async def analyze_batch(files: Annotated[List[UploadFile], File(...)]):
                 "ocr_soft_limit": OCR_SOFT_LIMIT,
                 "ocr_alert": False,
                 "extraction_error": str(e),
-                "parser_debug": ["eccezione gestita in endpoint /analyze-batch"],
+                "parser_debug": [
+                    "eccezione gestita in endpoint /analyze-batch",
+                    tb
+                ],
             })
 
     return {
