@@ -388,6 +388,10 @@ DATE_STRONG_LABELS = [
     "terminato il",
     "data fine corso",
     "fine corso",
+    "data di rilascio",
+    "data rilascio",
+    "rilasciato il",
+    "luogo e data",
 ]
 
 DATE_WEAK_PERIOD_LABELS = [
@@ -1319,8 +1323,8 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         scores["attestati"] += 8
         debug["positive_hits"].append("attestati:+8 titolo contiene attestato")
     elif "attestato" in blob:
-        scores["attestati"] += 3
-        debug["positive_hits"].append("attestati:+3 testo contiene attestato")
+        scores["attestati"] += 4
+        debug["positive_hits"].append("attestati:+4 testo contiene attestato")
 
     attestato_title_hits = count_keywords(title_blob, ATTESTATO_POSITIVE_SIGNALS)
     attestato_full_hits = count_keywords(blob, ATTESTATO_POSITIVE_SIGNALS)
@@ -1330,8 +1334,33 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
         debug["positive_hits"].append(f"attestati:+{attestato_title_hits * 3} segnali attestato nel titolo")
 
     if attestato_full_hits >= 2:
-        scores["attestati"] += 2
-        debug["positive_hits"].append("attestati:+2 conferma dal corpo")
+        scores["attestati"] += 4
+        debug["positive_hits"].append("attestati:+4 conferma forte dal corpo")
+
+    # struttura molto tipica attestato
+    strong_attestato_structure = 0
+    if "si attesta che" in blob:
+        strong_attestato_structure += 1
+    if "ha frequentato" in blob:
+        strong_attestato_structure += 1
+    if "ha partecipato" in blob:
+        strong_attestato_structure += 1
+    if "attestato di frequenza" in blob:
+        strong_attestato_structure += 1
+    if "attestato di partecipazione" in blob:
+        strong_attestato_structure += 1
+    if "attestato di formazione" in blob:
+        strong_attestato_structure += 1
+    if "rilasciato a" in blob or "conferito a" in blob:
+        strong_attestato_structure += 1
+
+    if strong_attestato_structure >= 2:
+        scores["attestati"] += 8
+        debug["positive_hits"].append("attestati:+8 struttura forte da attestato")
+
+    if strong_attestato_structure >= 3:
+        scores["attestati"] += 4
+        debug["positive_hits"].append("attestati:+4 struttura molto forte da attestato")
 
     if "conferito a" in blob or "rilasciato a" in blob:
         scores["attestati"] += 2
@@ -1490,6 +1519,11 @@ def score_category(text: str, filename: str) -> Tuple[str, Dict[str, int], Dict[
     if any(x in title_blob for x in ["dvr", "valutazione dei rischi", "pos", "psc"]):
         scores["attestati"] = max(0, scores["attestati"] - 5)
         debug["negative_hits"].append("attestati:-5 titolo da documento aziendale")
+
+    # se struttura attestato è forte, non lasciare che piccole ambiguità lo buttino fuori
+    if strong_attestato_structure >= 3 and scores["attestati"] < 10:
+        scores["attestati"] = 10
+        debug["positive_hits"].append("attestati:set minimo 10 per struttura attestato forte")
 
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     best_category, best_score = ordered[0]
@@ -1917,17 +1951,39 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
 
     for c in candidates:
         dt = c["date"]
+
+        # escludi in modo duro la data di nascita se esistono altre date plausibili
         if birth_date and dt.date() == birth_date.date():
-            c["score"] -= 25
-            c["reasons"].append("birth_date_penalty")
+            c["score"] -= 100
+            c["reasons"].append("birth_date_excluded")
+
+        # bonus su date moderne plausibili
+        if dt.year >= 2000:
+            c["score"] += 2
+            c["reasons"].append("modern_date_bonus")
+
+        # bonus se la riga contiene luogo+data classico degli attestati
+        line_norm = normalize_text_for_matching(c.get("line", ""))
+        if re.search(r"\b(foligno|perugia|terni|spoleto|assisi)\b", line_norm):
+            c["score"] += 4
+            c["reasons"].append("place_line_bonus")
+
+        # bonus se il contesto parla di rilascio
+        context_norm = normalize_text_for_matching(c.get("context", ""))
+        if "data di rilascio" in context_norm or "data rilascio" in context_norm or "rilasciato il" in context_norm:
+            c["score"] += 10
+            c["reasons"].append("release_date_bonus")
+
         filtered.append(c)
 
     ordered_all = sorted(filtered, key=lambda x: (x["score"], x["date"]), reverse=True)
 
+    # 1. priorità alle strong labels vere
     strong_candidates = [
         c for c in ordered_all
         if "strong_label" in c["reasons"]
         and "negative_context" not in c["reasons"]
+        and "birth_date_excluded" not in c["reasons"]
         and c["score"] >= 10
     ]
     if strong_candidates:
@@ -1935,6 +1991,7 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
         debug.append(f"data conclusione scelta da strong_label: {best['raw']}")
         return best["date"], debug, "strong_score", ordered_all
 
+    # 2. blocco periodo corso
     period_block_match = re.search(
         r"(giorni|periodo di svolgimento del corso|svolgimento del corso|dal)(.+?)(data emissione|attestato emesso|programma del corso|il responsabile|$)",
         text,
@@ -1946,17 +2003,22 @@ def extract_conclusion_date(text: str) -> Tuple[Optional[datetime], List[str], s
 
         valid_period_dates = []
         for dt in period_dates:
-            if 1990 <= dt.year <= datetime.now().year + 1:
-                valid_period_dates.append(dt)
+            if 2000 <= dt.year <= datetime.now().year + 1:
+                if not birth_date or dt.date() != birth_date.date():
+                    valid_period_dates.append(dt)
 
         if valid_period_dates:
             dt = max(valid_period_dates)
             debug.append("data conclusione scelta come ultima data valida di blocco periodo")
             return dt, debug, "period_block", ordered_all
 
+    # 3. fallback su data rilascio / luogo e data / miglior data moderna
     positive = [
         c for c in ordered_all
-        if c["score"] >= 1 and "negative_context" not in c["reasons"]
+        if c["score"] >= 1
+        and "negative_context" not in c["reasons"]
+        and "birth_date_excluded" not in c["reasons"]
+        and c["date"].year >= 2000
     ]
     if positive:
         best = positive[0]
